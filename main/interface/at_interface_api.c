@@ -11,6 +11,7 @@
 #include "esp_at.h"
 #include "esp_at_core.h"
 #include "esp_at_interface.h"
+#include "esp_at_link_gpio.h"
 #ifdef CONFIG_AT_SELF_COMMAND_SUPPORT
 #include "esp_at_self_cmd.h"
 #endif
@@ -24,6 +25,7 @@ static at_intf_security_ops_t s_intf_security_ops;
 #endif
 
 static const char *TAG = "at-intf";
+
 
 static int32_t at_port_read_data(uint8_t *buffer, int32_t len)
 {
@@ -204,6 +206,7 @@ static void at_normal_wakeup_before_cb(void)
 
 static void at_deep_sleep_before_cb(void)
 {
+    esp_at_link_gpio_clear_for_powerdown();
     // do some special things from the interface hook before deep sleep
     if (s_interface_hooks.pre_deepsleep_callback) {
         s_interface_hooks.pre_deepsleep_callback();
@@ -212,6 +215,7 @@ static void at_deep_sleep_before_cb(void)
 
 static void at_restart_before_cb(void)
 {
+    esp_at_link_gpio_clear_for_powerdown();
     // do some common things before restart
     at_port_wait_tx_done(ESP_AT_PORT_TX_WAIT_MS_MAX);
 
