@@ -29,4 +29,3 @@ bool link_gpio_state_disconnect(link_gpio_state_t *state, uint16_t handle);
 void link_gpio_state_reset(link_gpio_state_t *state);
 bool link_gpio_state_is_high(const link_gpio_state_t *state);
 uint8_t link_gpio_state_active_count(const link_gpio_state_t *state);
-

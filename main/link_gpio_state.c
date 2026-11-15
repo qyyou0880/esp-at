@@ -119,4 +119,3 @@ void link_gpio_state_reset(link_gpio_state_t *state)
 
 bool link_gpio_state_is_high(const link_gpio_state_t *state) { return state->link_high; }
 uint8_t link_gpio_state_active_count(const link_gpio_state_t *state) { return state->active_count; }
-
