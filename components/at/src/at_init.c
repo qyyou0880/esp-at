@@ -30,6 +30,7 @@
 #include "esp_at.h"
 #include "esp_at_init.h"
 #include "esp_at_interface.h"
+#include "esp_at_link_gpio.h"
 
 // global variables
 const char *g_at_mfg_nvs_name = "mfg_nvs";
@@ -424,6 +425,9 @@ void esp_at_init(void)
     // initialize the wifi configuration based on the parameters in the manufacturing partition
     at_wifi_config_init();
 #endif
+
+    // Load LINK GPIO after UART/NVS setup but before auto BLE startup in the AT core.
+    esp_at_link_gpio_init();
 
     // initialize the AT framework (init task, queue, at cmd parser, at cmd responder, etc)
     at_module_init();
