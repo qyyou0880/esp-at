@@ -55,7 +55,7 @@ static bool execute(air_config_session_t *s, char *cmd, const air_config_callbac
 {
     char response[80];
     if (strcmp(cmd, "AT+VER?") == 0) {
-        reply(cb, "+OK=SEISTECH-C6-AIR-2\r\n");
+        reply(cb, "+OK=SEISTECH-C6-AIR-3\r\n");
         return true;
     }
     if (strncmp(cmd, "AT+AUTH=", 8) == 0) {
@@ -152,6 +152,29 @@ static bool execute(air_config_session_t *s, char *cmd, const air_config_callbac
         reply(cb, "+OK\r\n");
         return true;
     }
+    if (strcmp(cmd,"AT+BOOTRST?")==0) {
+        snprintf(response,sizeof(response),"+OK=%d,%d,%d\r\n",s->boot_gpio,s->reset_gpio,s->bootrst_enabled?1:0);
+        reply(cb,response);return true;
+    }
+    if (strncmp(cmd,"AT+BOOTRST=",11)==0) {
+        char *first=strchr(cmd+11,',');
+        if (!first) goto bad;
+        *first++=0;char *second=strchr(first,',');
+        if (!second) goto bad;
+        *second++=0;int b,r,e;
+        if (!parse_decimal(cmd+11,&b) || !parse_decimal(first,&r) ||
+            !parse_decimal(second,&e) || e>1 || b==r) goto bad;
+        if (!cb->bootrst || !cb->bootrst(b,r,e,-1,cb->arg)) goto apply_failed;
+        s->boot_gpio=b;s->reset_gpio=r;s->bootrst_enabled=e!=0;
+        reply(cb,"+OK\r\n");return true;
+    }
+    if (strncmp(cmd,"AT+BOOTMODE=",12)==0) {
+        int mode;
+        if (!parse_decimal(cmd+12,&mode) || mode>1) goto bad;
+        if (!s->bootrst_enabled || !cb->bootrst ||
+            !cb->bootrst(s->boot_gpio,s->reset_gpio,1,mode,cb->arg)) goto apply_failed;
+        reply(cb,"+OK\r\n");return true;
+    }
     if (strcmp(cmd, "AT+LINKGPIO?") == 0) {
         snprintf(response, sizeof(response), "+OK=%d,%u,%u,%u\r\n", s->link_gpio,
                  s->link_high ? 1U : 0U, s->link_count, s->link_fault ? 1U : 0U);
@@ -195,6 +218,7 @@ void air_config_session_init(air_config_session_t *s, const air_uart_config_t *i
     s->uart.baudrate = 115200;
     s->uart.databits = 3;
     if (initial) s->uart = *initial;
+    s->boot_gpio = -1; s->reset_gpio = -1;
     s->link_gpio = -1;
 }
 

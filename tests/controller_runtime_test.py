@@ -56,6 +56,9 @@ int uart_wait_tx_done(int,unsigned);
 int uart_write_bytes(int,const void*,size_t);
 int uart_disable_pattern_det_intr(int);
 bool esp_at_link_gpio_configure(int,bool);
+bool esp_at_bootrst_configure(int,int,bool);
+bool esp_at_bootrst_mode(bool);
+void esp_at_bootrst_get(int*,int*,bool*);
 void esp_at_link_gpio_get_state(int*,bool*,unsigned*,bool*);
 void esp_at_restart(void);
 int esp_at_exe_cmd(const char*,const char*,unsigned);
@@ -135,6 +138,9 @@ int uart_param_config(int p,const uart_config_t*c){(void)p;actual=*c;return 0;}
 int uart_wait_tx_done(int p,unsigned t){(void)p;(void)t;return 0;}
 int uart_disable_pattern_det_intr(int p){(void)p;return 0;}
 int uart_write_bytes(int p,const void*d,size_t n){(void)p;assert(uart_length+n<=sizeof(uart_output));memcpy(uart_output+uart_length,d,n);uart_length+=n;return n;}
+bool esp_at_bootrst_configure(int b,int r,bool e){(void)b;(void)r;(void)e;return true;}
+bool esp_at_bootrst_mode(bool b){(void)b;return true;}
+void esp_at_bootrst_get(int*b,int*r,bool*e){*b=10;*r=11;*e=true;}
 bool esp_at_link_gpio_configure(int p,bool save){(void)p;(void)save;return true;}
 void esp_at_link_gpio_get_state(int*p,bool*h,unsigned*c,bool*f){*p=10;*h=true;*c=1;*f=false;}
 void esp_at_restart(void){assert(0 && "Unexpected reboot in host test");}

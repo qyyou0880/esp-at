@@ -39,7 +39,7 @@ Never log authentication payloads, passwords or internal commands containing the
   only. Public factory default is 123456. Reject all modifying/query config commands
   before authentication (AT/version may be public if documented). Clear auth and
   pending fragments at disconnect; do not reuse a stale command on a new connection.
-- `AT+VER?`: identify as `+OK=SEISTECH-C6-AIR-2` (NOT FW-7534).
+- `AT+VER?`: identify as `+OK=SEISTECH-C6-AIR-3` (NOT FW-7534).
 - `AT+BAUDRATE?`, `AT+BAUDRATE=<absolute>`: AIR-2 absolute baud rate, 80..5000000,
   subject to actual UART driver acceptance. Query reports actual divisor-derived
   rate. Application target for the C6 companion STM32 build is 1000000 8N1.
@@ -113,3 +113,29 @@ sdkconfig. Target build may need existing ESP-AT components; preserve source bas
 
 Produce IMPLEMENTATION.md with exact tests/commands, limitations, build artifact
 locations and protocol. Commit code and documentation, not artifacts/caches/secrets.
+
+
+## AIR-3 automatic STM32 reset (C6 only)
+
+`AT+BOOTRST=10,11,1` selects BOOT0 GPIO10, NRST GPIO11 and saves enable.
+The same command is available on local ESP-AT UART and authenticated FFF3.
+Local query returns `+BOOTRST:10,11,1`; FFF3 query returns `+OK=10,11,1`.
+Disable with `AT+BOOTRST=10,11,0`. Pins must be distinct allowed outputs, not UART,
+USB, flash, console or RTC pins. Disable before changing pins. An enabled profile
+owns BOOT instead of LINK; legacy LINK reconfiguration is rejected until disabled.
+NRST is open drain with no internal pull-up; STM32 NRST must have its normal pull-up.
+At startup and after BLE disconnect, NRST is released and BOOT is low; no reset
+pulse occurs on connection or disconnection. Enabling does not reset STM32.
+
+`AT+BOOTMODE=1` sets BOOT high, waits 10 ms, pulls NRST low for 50 ms, releases
+NRST, waits 50 ms, then replies. `AT+BOOTMODE=0` uses the same sequence with BOOT low
+and starts the application. These commands require an enabled profile. No reset is
+performed by BLE callbacks: the air worker handles pulses. Disconnect cleanup releases
+NRST; there is no automatic retry or reset into potentially incomplete application code.
+FFF3 control may be used while the SAME connection is subscribed to FFF1 raw UART.
+Thus the updater arms raw UART, pulses ROM reset, synchronizes and flashes without
+human power cycling. After full verification it restores the selected application UART,
+then resets into application mode and disconnects. E104 remains manual.
+
+Application UART may use 1000000 8N1 independently of ROM 38400 8E1. STM32 application
+must match; do not apply a C6 1Mbps application image to the E104 profile.

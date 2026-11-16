@@ -25,6 +25,8 @@ typedef struct {
     bool notify_armed;
     bool log_suppressed;
     air_uart_config_t uart;
+    int boot_gpio, reset_gpio;
+    bool bootrst_enabled;
     int link_gpio;
     bool link_high;
     unsigned link_count;
@@ -43,6 +45,7 @@ typedef void (*air_config_reply_fn)(const char *response, size_t length, void *a
 typedef struct {
     air_config_apply_fn apply_uart;
     air_config_link_fn apply_link;
+    bool (*bootrst)(int boot,int reset,int enabled,int mode,void *arg);
     air_config_reset_fn request_reset;
     air_config_reply_fn reply;
     void *arg;

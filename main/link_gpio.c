@@ -10,6 +10,7 @@
 #include "esp_at_link_gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "nvs.h"
 #include "host/ble_gap.h"
 #include "nimble/nimble_port.h"
@@ -72,7 +73,7 @@ static bool link_gpio_prepare_pin(int gpio, bool high)
     }
     uint64_t mask = 1ULL << gpio;
     if (s_owned_pins & mask) {
-        return true; /* Already output; never reset an active pin's direction. */
+        return gpio_set_direction(gpio,GPIO_MODE_OUTPUT)==ESP_OK;
     }
     /* Load the output latch before enabling the output, avoiding a stale high. */
     if (gpio_set_level(gpio, high ? 1 : 0) != ESP_OK) {
@@ -129,6 +130,8 @@ static bool link_gpio_save_cb(int gpio, void *arg)
     return err == ESP_OK;
 }
 
+#include "bootrst.inc"
+
 void esp_at_link_gpio_init(void)
 {
     if (s_lock) return;
@@ -146,6 +149,7 @@ void esp_at_link_gpio_init(void)
         s_state.fault = true;
         ESP_LOGE(TAG, "saved configuration invalid/unavailable; LINK disabled");
     }
+    bootrst_load();
 }
 
 static uint8_t link_gpio_query(uint8_t *cmd_name)
@@ -179,7 +183,7 @@ static uint8_t link_gpio_setup(uint8_t para_num)
         return ESP_AT_RESULT_CODE_ERROR;
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    bool ok = !s_powerdown && (gpio == -1 || link_gpio_pin_allowed(gpio));
+    bool ok = !s_powerdown && !s_bootrst.enabled && (gpio == -1 || link_gpio_pin_allowed(gpio));
     if (ok) ok = link_gpio_prepare_pin(gpio, s_state.active_count != 0);
     if (ok) ok = link_gpio_state_configure_persist(&s_state, gpio, save ? link_gpio_save_cb : NULL, NULL);
     if (!ok && gpio >= 0 && gpio <= 30 && gpio != s_state.gpio && (s_owned_pins & (1ULL << gpio))) {
@@ -193,7 +197,7 @@ bool esp_at_link_gpio_configure(int gpio, bool save)
 {
     if (!s_lock) return false;
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    bool ok = !s_powerdown && (gpio == -1 || link_gpio_pin_allowed(gpio));
+    bool ok = !s_powerdown && !s_bootrst.enabled && (gpio == -1 || link_gpio_pin_allowed(gpio));
     if (ok) ok = link_gpio_prepare_pin(gpio, s_state.active_count != 0);
     if (ok) ok = link_gpio_state_configure_persist(&s_state, gpio, save ? link_gpio_save_cb : NULL, NULL);
     if (!ok && gpio >= 0 && gpio <= 30 && gpio != s_state.gpio && (s_owned_pins & (1ULL << gpio))) {
@@ -235,6 +239,8 @@ static uint8_t rtc_clock_query(uint8_t *cmd_name)
 static const esp_at_cmd_t s_cmd[] = {
     {"+LINKGPIO", link_gpio_test, link_gpio_query, link_gpio_setup, NULL},
     {"+RTCCLK", NULL, rtc_clock_query, NULL, NULL},
+    {"+BOOTRST", NULL, bootrst_query, bootrst_setup, NULL},
+    {"+BOOTMODE", NULL, NULL, bootmode_setup, NULL},
 };
 
 static int link_gpio_gap_event(struct ble_gap_event *event, void *arg)
@@ -247,6 +253,7 @@ static int link_gpio_gap_event(struct ble_gap_event *event, void *arg)
             (void)link_gpio_state_connect(&s_state, event->connect.conn_handle, event->connect.status);
         } else if (event->type == BLE_GAP_EVENT_DISCONNECT) {
             (void)link_gpio_state_disconnect(&s_state, event->disconnect.conn.conn_handle);
+            if (!s_state.active_count) bootrst_release();
         }
     }
     xSemaphoreGive(s_lock);
@@ -309,6 +316,7 @@ void esp_at_link_gpio_clear_for_powerdown(void)
 {
     if (!s_lock) return;
     xSemaphoreTake(s_lock, portMAX_DELAY);
+    bootrst_release();
     s_powerdown = true; /* Ignore a pending CONNECT racing a restart/deep sleep. */
     link_gpio_state_reset(&s_state);
     xSemaphoreGive(s_lock);

@@ -14,3 +14,9 @@ static inline bool esp_at_link_gpio_configure(int gpio, bool save) { (void)gpio;
 static inline void esp_at_link_gpio_get_state(int *gpio, bool *high, unsigned *count, bool *fault)
 { *gpio=-1; *high=false; *count=0; *fault=true; }
 #endif
+
+#if defined(CONFIG_IDF_TARGET_ESP32C6) && defined(CONFIG_BT_NIMBLE_ENABLED)
+bool esp_at_bootrst_configure(int boot, int reset, bool enabled);
+bool esp_at_bootrst_mode(bool bootloader);
+void esp_at_bootrst_get(int *boot, int *reset, bool *enabled);
+#endif

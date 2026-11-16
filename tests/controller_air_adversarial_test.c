@@ -3,6 +3,10 @@
 #include <stdio.h>
 #include <string.h>
 
+static int bootcalls,bootmode;
+static bool bootok=true;
+static bool bootcontrol(int b,int r,int e,int mode,void *arg)
+{(void)arg;assert(b==10&&r==11&&e==1);++bootcalls;bootmode=mode;return bootok;}
 static int applies;
 static bool apply_ok=true;
 static int linked_gpio;
@@ -17,8 +21,24 @@ static bool link_apply(int gpio,bool save,void *arg)
 int main(void)
 {
     air_config_session_t s;
-    air_config_callbacks_t cb={.apply_uart=apply,.apply_link=link_apply,.reply=response};
+    air_config_callbacks_t cb={.apply_uart=apply,.apply_link=link_apply,.reply=response,.bootrst=bootcontrol};
     air_config_session_init(&s,NULL,1);
+    s.authenticated=true;
+    const char *cfg="AT+BOOTRST=10,11,1\r\n";
+    air_config_feed(&s,(const uint8_t*)cfg,strlen(cfg),0,&cb);
+    assert(bootcalls==1&&bootmode==-1&&s.bootrst_enabled);
+    const char *mode="AT+BOOTMODE=1\r\n";
+    air_config_feed(&s,(const uint8_t*)mode,strlen(mode),0,&cb);
+    assert(bootcalls==2&&bootmode==1);
+    bootok=false;
+    air_config_feed(&s,(const uint8_t*)cfg,strlen(cfg),0,&cb);
+    assert(strstr(last_reply,"APPLY"));bootok=true;
+    const char *bad="AT+BOOTRST=10,10,1\r\nAT+BOOTRST=10,11,2\r\nAT+BOOTMODE=2\r\n";
+    air_config_feed(&s,(const uint8_t*)bad,strlen(bad),0,&cb);
+    assert(bootcalls==3);
+    s.authenticated=false;
+    air_config_feed(&s,(const uint8_t*)mode,strlen(mode),0,&cb);
+    assert(bootcalls==3&&strstr(last_reply,"AUTH_REQUIRED"));
     s.authenticated=true;
     unsigned char overlong[180];
     memset(overlong,'x',97);

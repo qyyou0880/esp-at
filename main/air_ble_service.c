@@ -244,6 +244,13 @@ static bool apply_link(int gpio, bool save, void *arg)
     return valid(ctx->conn,ctx->generation) && esp_at_link_gpio_configure(gpio,save);
 }
 
+static bool bootrst(int boot,int reset,int enabled,int mode,void *arg)
+{
+    air_message_t *ctx=arg;
+    if (!valid(ctx->conn,ctx->generation)) return false;
+    return mode<0 ? esp_at_bootrst_configure(boot,reset,enabled!=0) : esp_at_bootrst_mode(mode!=0);
+}
+
 static bool reset(void *arg)
 {
     air_message_t *ctx = arg;
@@ -258,7 +265,7 @@ static bool reset(void *arg)
 static void worker_step(void)
 {
     air_config_callbacks_t callbacks = {.apply_uart=apply_uart,.apply_link=apply_link,
-        .request_reset=reset,.reply=reply,.arg=&s_context};
+        .bootrst=bootrst,.request_reset=reset,.reply=reply,.arg=&s_context};
         portENTER_CRITICAL(&s_lock); bool fault = s_fault; portEXIT_CRITICAL(&s_lock);
         if (fault || uxQueueMessagesWaiting(s_output)) signal_host();
         air_message_t item;
@@ -277,6 +284,7 @@ static void worker_step(void)
                 air_config_set_notify_armed(&s_session,false);
             } else if (item.channel == AIR_BLE_CONFIG_UUID16) {
                 refresh_uart();
+                esp_at_bootrst_get(&s_session.boot_gpio,&s_session.reset_gpio,&s_session.bootrst_enabled);
                 int gpio; bool high, fault; unsigned count;
                 esp_at_link_gpio_get_state(&gpio,&high,&count,&fault);
                 air_config_set_link_state(&s_session,gpio,high,count,fault);
