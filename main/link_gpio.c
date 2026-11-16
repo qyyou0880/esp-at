@@ -149,7 +149,9 @@ void esp_at_link_gpio_init(void)
         s_state.fault = true;
         ESP_LOGE(TAG, "saved configuration invalid/unavailable; LINK disabled");
     }
+    ESP_LOGI(TAG,"loading BOOTRST profile");
     bootrst_load();
+    ESP_LOGI(TAG,"BOOTRST profile loaded");
 }
 
 static uint8_t link_gpio_query(uint8_t *cmd_name)

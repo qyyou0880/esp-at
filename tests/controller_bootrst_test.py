@@ -23,6 +23,7 @@ typedef int nvs_handle_t;typedef int esp_err_t;
 #define ESP_AT_RESULT_CODE_ERROR 1
 #define ESP_AT_RESULT_CODE_OK 0
 #define ESP_LOGE(...) ((void)0)
+#define ESP_LOGI(...) ((void)0)
 typedef struct {uint64_t pin_bit_mask;int mode,pull_up_en,pull_down_en,intr_type;} gpio_config_t;
 static int s_lock=1;static bool s_powerdown;static uint64_t s_owned_pins;
 static struct {int gpio;} s_state={10};

@@ -25,6 +25,7 @@ static bool bootrst_configure_locked(int boot,int reset,bool enabled,bool persis
     if (s_powerdown || boot==reset || !link_gpio_pin_allowed(boot) ||
         !link_gpio_pin_allowed(reset)) return false;
     if (s_bootrst.enabled && (boot!=s_bootrst.boot || reset!=s_bootrst.reset)) return false;
+    ESP_LOGI(TAG,"BOOTRST pins %d/%d enable=%d persist=%d",boot,reset,enabled,persist);
     if (enabled && !s_bootrst.enabled) {
         /* Never turn a push-pull LINK output into NRST while it is high. */
         if (reset==s_state.gpio) return false;
@@ -38,6 +39,7 @@ static bool bootrst_configure_locked(int boot,int reset,bool enabled,bool persis
         s_owned_pins|=1ULL<<reset;
         if (gpio_sleep_sel_dis(reset)!=ESP_OK) return false;
     }
+    ESP_LOGI(TAG,"BOOTRST GPIO prepared");
     bootrst_config_t next={boot,reset,enabled};
     if (persist && !bootrst_save(&next)) return false;
     if (enabled) {
@@ -52,6 +54,7 @@ static bool bootrst_configure_locked(int boot,int reset,bool enabled,bool persis
         if (s_bootrst.boot>=0) (void)gpio_set_direction(s_bootrst.boot,GPIO_MODE_INPUT);
     }
     s_bootrst=next;
+    ESP_LOGI(TAG,"BOOTRST applied");
     return true;
 }
 
