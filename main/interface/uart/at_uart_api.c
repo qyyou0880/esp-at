@@ -305,6 +305,19 @@ void at_nvs_uart_config_set(uart_config_t *config)
     at_nvs_uart_config_set_internal(&to_set_config);
 }
 
+bool at_nvs_uart_config_set_checked(uart_config_t *config)
+{
+    at_uart_config_t to_set_config;
+    if (!config) return false;
+    memset(&to_set_config, 0, sizeof(to_set_config));
+    to_set_config.baudrate = config->baud_rate;
+    to_set_config.data_bits = config->data_bits;
+    to_set_config.flow_control = config->flow_ctrl;
+    to_set_config.parity = config->parity;
+    to_set_config.stop_bits = config->stop_bits;
+    return at_nvs_uart_config_set_internal(&to_set_config);
+}
+
 bool at_nvs_uart_config_get(uart_config_t *config)
 {
     // get uart configurations from flash

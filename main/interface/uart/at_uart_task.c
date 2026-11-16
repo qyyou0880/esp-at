@@ -23,11 +23,12 @@
 #include "soc/uart_pins.h"
 #include "at_uart.h"
 #include "esp_at_interface.h"
+#include "air_ble_service.h"
 
 #if CONFIG_AT_DEBUG
 #define ESP_AT_UART_TASK_STACK_SIZE     esp_at_max(4096, CONFIG_AT_UART_TASK_STACK_SIZE)
 #else
-#define ESP_AT_UART_TASK_STACK_SIZE     CONFIG_AT_UART_TASK_STACK_SIZE
+#define ESP_AT_UART_TASK_STACK_SIZE     esp_at_max(4096, CONFIG_AT_UART_TASK_STACK_SIZE)
 #endif
 
 // static variables
@@ -41,16 +42,19 @@ at_uart_port_pins_t g_uart_port_pin;
 
 static int32_t at_uart_write_data(uint8_t *data, int32_t len)
 {
+    if (air_ble_service_uart_suppress()) return len;
     return uart_write_bytes(g_at_cmd_port, (char *)data, len);
 }
 
 static int32_t at_uart_read_data(uint8_t *buffer, int32_t len)
 {
+    if (air_ble_service_uart_active()) return 0;
     return uart_read_bytes(g_at_cmd_port, buffer, len, portTICK_PERIOD_MS);
 }
 
 static int32_t at_uart_get_data_len(void)
 {
+    if (air_ble_service_uart_active()) return 0;
     size_t size = 0;
     if (uart_get_buffered_data_len(g_at_cmd_port, &size) == ESP_OK) {
         int pattern_pos = uart_pattern_get_pos(g_at_cmd_port);
@@ -67,6 +71,20 @@ static void at_uart_flush(void)
 {
     uart_flush_input(g_at_cmd_port);
     xQueueReset(s_at_uart_queue);
+}
+
+static bool at_uart_route_raw(size_t length)
+{
+    if (!air_ble_service_uart_active()) return false;
+    uint8_t buffer[256];
+    while (length) {
+        size_t chunk = length > sizeof(buffer) ? sizeof(buffer) : length;
+        int got = uart_read_bytes(g_at_cmd_port, buffer, chunk, 0);
+        if (got > 0 && !air_ble_service_uart_route(buffer, got)) return true;
+        if (got != (int)chunk) { air_ble_service_uart_fault(); return true; }
+        length -= chunk;
+    }
+    return true;
 }
 
 static bool at_uart_wait_tx_done(int32_t ms)
@@ -102,7 +120,8 @@ retry:
                     if (event.type == UART_DATA) {
                         data_len += event.size;
                     } else if (event.type == UART_BUFFER_FULL) {
-                        esp_at_port_recv_data_notify(data_len, portMAX_DELAY);
+                        if (air_ble_service_uart_active()) (void)at_uart_route_raw(data_len);
+                        else esp_at_port_recv_data_notify(data_len, portMAX_DELAY);
                         data_len = event.size;
                         break;
                     } else {
@@ -110,7 +129,8 @@ retry:
                         break;
                     }
                 }
-                esp_at_port_recv_data_notify(data_len, portMAX_DELAY);
+                if (air_ble_service_uart_active()) (void)at_uart_route_raw(data_len);
+                else esp_at_port_recv_data_notify(data_len, portMAX_DELAY);
                 data_len = 0;
 
                 if (retry_flag == pdTRUE) {
@@ -119,6 +139,12 @@ retry:
                 break;
 
             case UART_PATTERN_DET:
+                if (air_ble_service_uart_active()) {
+                    size_t available = 0;
+                    uart_get_buffered_data_len(g_at_cmd_port, &available);
+                    if (available) (void)at_uart_route_raw(available);
+                    break;
+                }
                 pattern_pos = uart_pattern_pop_pos(g_at_cmd_port);
                 if (pattern_pos >= 0) {
                     data = (uint8_t *)malloc(pattern_pos + 3);
@@ -138,6 +164,7 @@ retry:
                 break;
 
             case UART_FIFO_OVF:
+                if (air_ble_service_uart_active()) air_ble_service_uart_fault();
                 retry_flag = pdFALSE;
                 while (xQueueReceive(s_at_uart_queue, (void *)&event, 0) == pdTRUE) {
                     if ((event.type == UART_DATA) || (event.type == UART_BUFFER_FULL) || (event.type == UART_FIFO_OVF)) {
@@ -147,7 +174,10 @@ retry:
                         break;
                     }
                 }
-                esp_at_port_recv_data_notify(at_uart_get_data_len(), portMAX_DELAY);
+                size_t available = 0;
+                uart_get_buffered_data_len(g_at_cmd_port, &available);
+                if (air_ble_service_uart_active()) (void)at_uart_route_raw(available);
+                else esp_at_port_recv_data_notify(available, portMAX_DELAY);
                 data_len = 0;
                 if (retry_flag == pdTRUE) {
                     goto retry;

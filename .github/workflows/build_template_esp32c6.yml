@@ -44,7 +44,12 @@ jobs:
     - name: Disable official OTA support
       run: |
         source .github/workflows/utils.sh && disable_official_ota_cmd
-    - name: Install compilation environment
+    - name: Check LINK GPIO host state machine
+      # Build the same production state machine on the runner before the target build.
+      run: |
+        gcc -std=c11 -Wall -Wextra -Werror -I main tests/link_gpio_host_test.c main/link_gpio_state.c -o /tmp/link_gpio_host_test
+        /tmp/link_gpio_host_test
+    - name: Install ESP compilation environment
       run: |
         ./build.py install
     - name: Compile
@@ -52,6 +57,13 @@ jobs:
         ./build.py build
     - name: Post process
       run: |
+        grep -qx 'CONFIG_RTC_CLK_SRC_EXT_OSC=y' sdkconfig
+        grep -qx '# CONFIG_RTC_CLK_SRC_EXT_CRYS is not set' sdkconfig
+        grep -q '__wrap_nimble_port_init' build/*.map
+        grep -q '__wrap_nimble_port_deinit' build/*.map
+        strings build/*.elf | grep -F '+LINKGPIO'
+        strings build/*.elf | grep -F '+RTCCLK'
+        grep -E 'RTC_CLK_SRC|ESP_SYSTEM_RTC_EXT|RTC_CLK_CAL_CYCLES' sdkconfig
         cp .github/workflows/NOTES.txt NOTES.txt
     - name: Upload artifacts
       uses: actions/upload-artifact@v7.0.0
