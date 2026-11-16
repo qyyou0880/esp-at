@@ -139,3 +139,12 @@ then resets into application mode and disconnects. E104 remains manual.
 
 Application UART may use 1000000 8N1 independently of ROM 38400 8E1. STM32 application
 must match; do not apply a C6 1Mbps application image to the E104 profile.
+
+Automatic BOOTRST mode dedicates the AT UART to STM32 binary application/ROM data.
+When FFF1 is not subscribed, unsolicited STM32 UART bytes (including startup noise
+and incomplete E104 AT strings from the old application) are drained and discarded;
+they never enter the ESP-AT parser. ESP-AT status output is also suppressed on that
+application UART. This prevents an incomplete STM32 startup line from blocking the
+internal BLE advertising commands. Full ESP-AT command sets remain compiled; to use
+the local UART as a conventional AT console, disable BOOTRST over authenticated FFF3
+(`AT+BOOTRST=10,11,0`), then use the normal UART. Raw-mode ownership is unchanged.

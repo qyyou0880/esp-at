@@ -52,6 +52,7 @@ int main(void){
  assert(!esp_at_bootrst_configure(6,11,true));
  assert(!esp_at_bootrst_mode(true));
  assert(esp_at_bootrst_configure(10,11,true));
+ assert(esp_at_bootrst_uart_is_data());
  assert(s_state.gpio==-1&&modes[11]==GPIO_MODE_OUTPUT_OD&&levels[11]==1&&levels[10]==0);
  assert(esp_at_bootrst_mode(true));assert(levels[10]==1&&levels[11]==1&&lowpulses==1&&delays==110);
  assert(esp_at_bootrst_configure(10,11,true));assert(levels[10]==1&&lowpulses==1);
@@ -60,7 +61,7 @@ int main(void){
  assert(esp_at_bootrst_mode(true));bootrst_release();assert(levels[10]==0&&levels[11]==1);
  saveok=false;assert(!esp_at_bootrst_configure(10,11,false));assert(s_bootrst.enabled);
  saveok=true;assert(esp_at_bootrst_configure(10,11,false));assert(!s_bootrst.enabled&&modes[11]==GPIO_MODE_INPUT);
- assert(!esp_at_bootrst_mode(true));
+ assert(!esp_at_bootrst_mode(true));assert(!esp_at_bootrst_uart_is_data());
  assert(esp_at_bootrst_configure(10,11,true));s_bootrst.enabled=false;bootrst_load();assert(s_bootrst.enabled&&levels[10]==0&&levels[11]==1);
  s_powerdown=true;assert(!esp_at_bootrst_mode(true));
  assert(bootrst_setup(0)==1&&bootmode_setup(0)==1);bootrst_query((uint8_t*)"+BOOTRST");

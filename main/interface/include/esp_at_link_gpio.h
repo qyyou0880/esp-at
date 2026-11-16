@@ -20,3 +20,9 @@ bool esp_at_bootrst_configure(int boot, int reset, bool enabled);
 bool esp_at_bootrst_mode(bool bootloader);
 void esp_at_bootrst_get(int *boot, int *reset, bool *enabled);
 #endif
+
+#if defined(CONFIG_IDF_TARGET_ESP32C6) && defined(CONFIG_BT_NIMBLE_ENABLED)
+bool esp_at_bootrst_uart_is_data(void);
+#else
+static inline bool esp_at_bootrst_uart_is_data(void) { return false; }
+#endif

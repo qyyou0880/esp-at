@@ -2,6 +2,8 @@
 /* Included by link_gpio.c: one mutex owns LINK and BOOT/NRST pins. */
 typedef struct { int32_t boot, reset, enabled; } bootrst_config_t;
 static bootrst_config_t s_bootrst = {-1,-1,0};
+static volatile bool s_bootrst_uart_data;
+bool esp_at_bootrst_uart_is_data(void) { return s_bootrst_uart_data; }
 
 static void bootrst_release(void)
 {
@@ -54,6 +56,7 @@ static bool bootrst_configure_locked(int boot,int reset,bool enabled,bool persis
         if (s_bootrst.boot>=0) (void)gpio_set_direction(s_bootrst.boot,GPIO_MODE_INPUT);
     }
     s_bootrst=next;
+    s_bootrst_uart_data=enabled;
     ESP_LOGI(TAG,"BOOTRST applied");
     return true;
 }
