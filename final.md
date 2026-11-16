@@ -1,5 +1,8 @@
 # Verification
 
+Historical Acer worker report below; superseded by the controller's independent
+implementation, build and tests described in IMPLEMENTATION.md. Not release acceptance.
+
 Commands run in this checkout:
 
     gcc -std=c11 -Wall -Wextra -Werror -I main main/air_config_parser.c tests/air_config_parser_test.c -o /tmp/air_config_parser_test

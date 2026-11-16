@@ -43,6 +43,7 @@ static bool s_fault;
 static air_config_session_t s_session;
 static air_message_t s_context;
 static TickType_t s_reset_at;
+static TickType_t s_mute_until;
 
 static bool valid(uint16_t conn, uint32_t generation)
 {
@@ -155,6 +156,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
     if (event->type == BLE_GAP_EVENT_DISCONNECT) {
         portENTER_CRITICAL(&s_lock);
         if (s_conn == event->disconnect.conn.conn_handle) {
+            if (s_raw) s_mute_until=xTaskGetTickCount()+pdMS_TO_TICKS(250);
             s_conn = BLE_HS_CONN_HANDLE_NONE; ++s_generation; s_raw = false; s_failed = false;
         }
         s_adv_pending = true;
@@ -225,6 +227,7 @@ static bool apply_uart(const air_uart_config_t *config, void *arg)
     if (uart_param_config(at_uart_port_get(),&next) != ESP_OK) return false;
     if (at_nvs_uart_config_set_checked(&next)) return true;
     if (uart_param_config(at_uart_port_get(),&previous) != ESP_OK) fail_session(ctx->generation);
+    if (!at_nvs_uart_config_set_checked(&previous)) fail_session(ctx->generation);
     return false;
 }
 
@@ -243,17 +246,15 @@ static bool reset(void *arg)
     return true;
 }
 
-static void worker(void *arg)
+static void worker_step(void)
 {
-    (void)arg;
     air_config_callbacks_t callbacks = {.apply_uart=apply_uart,.apply_link=apply_link,
         .request_reset=reset,.reply=reply,.arg=&s_context};
-    for (;;) {
         portENTER_CRITICAL(&s_lock); bool fault = s_fault; portEXIT_CRITICAL(&s_lock);
         if (fault || uxQueueMessagesWaiting(s_output)) signal_host();
         air_message_t item;
         if (xQueueReceive(s_input,&item,pdMS_TO_TICKS(10)) == pdTRUE) {
-            if (!valid(item.conn,item.generation)) continue;
+            if (!valid(item.conn,item.generation)) return;
             s_context.conn = item.conn; s_context.generation = item.generation;
             if (item.channel == AIR_SESSION) {
                 air_config_session_init(&s_session,NULL,item.generation);
@@ -281,7 +282,12 @@ static void worker(void *arg)
         if (valid(s_context.conn,s_context.generation))
             air_config_flush_idle(&s_session,xTaskGetTickCount()*portTICK_PERIOD_MS,&callbacks);
         if (s_reset_at && (int32_t)(xTaskGetTickCount()-s_reset_at) >= 0) esp_at_restart();
-    }
+}
+
+static void worker(void *arg)
+{
+    (void)arg;
+    for (;;) worker_step();
 }
 
 static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -336,6 +342,7 @@ void air_ble_service_unregister(void)
     s_registered=false; s_raw=false; ++s_generation; s_conn=BLE_HS_CONN_HANDLE_NONE;
     portEXIT_CRITICAL(&s_lock);
     (void)ble_gap_event_listener_unregister(&s_listener);
+    ble_npl_event_deinit(&s_output_event);
     /* Fixed queues/worker are reused across reinit; no per-reinit allocation. */
 }
 
@@ -345,6 +352,14 @@ bool air_ble_service_uart_active(void)
     bool active=s_registered && s_conn!=BLE_HS_CONN_HANDLE_NONE && s_raw;
     portEXIT_CRITICAL(&s_lock);
     return active;
+}
+
+bool air_ble_service_uart_suppress(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool suppress=s_raw || (s_mute_until && (int32_t)(xTaskGetTickCount()-s_mute_until)<0);
+    portEXIT_CRITICAL(&s_lock);
+    return suppress;
 }
 
 bool air_ble_service_uart_route(const uint8_t *data, size_t length)
@@ -399,6 +414,7 @@ bool air_ble_service_register(void){return true;}
 void air_ble_service_unregister(void){}
 void air_ble_service_autostart(void){}
 bool air_ble_service_uart_active(void){return false;}
+bool air_ble_service_uart_suppress(void){return false;}
 bool air_ble_service_uart_route(const uint8_t *data,size_t length){(void)data;(void)length;return false;}
 void air_ble_service_uart_fault(void){}
 #endif

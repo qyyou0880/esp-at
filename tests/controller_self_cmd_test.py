@@ -94,7 +94,7 @@ with TemporaryDirectory() as directory:
         target = path / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
-    source = Path(__import__('sys').argv[1]).resolve() if len(__import__('sys').argv)>1 else root/'parent_at_self_cmd.c'
+    source = Path(__import__('sys').argv[1]).resolve() if len(__import__('sys').argv)>1 else root.parent/'components/at/src/at_self_cmd.c'
     (path/'test.c').write_text(harness.replace('PARENT_SOURCE',source.as_posix()))
     gcc = 'D:/msys64/ucrt64/bin/gcc.exe' if __import__('os').name=='nt' else 'gcc'
     subprocess.run([gcc,'-std=c11','-Wall','-Wextra','-Werror','-I',str(path),str(path/'test.c'),'-o',str(path/'test.exe')],check=True)

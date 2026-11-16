@@ -4,7 +4,13 @@ The normal ESP-AT application remains intact, including Wi-Fi and the existing A
 
 FFF3 uses the production parser in main/air_config_parser.c. It supports fragmented commands, CR/LF and idle framing, 96-byte command bounds, embedded-control rejection with idle recovery, per-generation authentication, checked parameter validation, rollback callbacks, real baud-code queries, and configuration parsing after raw mode is armed. FFF1 subscription arms raw mode for that connection; disconnect invalidates queued work and authentication. FFF2 accepts chained mbufs up to 512 bytes, including a 258-byte ROM frame.
 
-The UART task remains the sole reader. While FFF1 is subscribed, RX bytes are sent directly to FFF1 and pattern detection is bypassed; FFF2 writes use direct UART TX and never pass through AT output filtering. GAP callbacks only update generation/connection state and enqueue work. Notification mbufs are transferred to NimBLE exactly once. Reinitialization unregisters the listener and deletes the queue/worker before the NimBLE wrapper deinitializes.
+The UART task is the sole raw reader; normal AT input callbacks return no bytes while FFF1 is armed. Raw TX bypasses AT output filtering. Binary +++ cannot escape the bridge. The worker serializes configuration and UART TX, waits for TX completion before changing parameters, reads the actual driver configuration, and checks NVS writes. Failed apply restores previous UART settings and attempts NVS rollback; unrecoverable rollback faults the session.
+
+GAP/GATT callbacks enqueue bounded work without waiting for UART/NVS. Ownership is claimed by an FFF client, so a legacy connection cannot steal it. Input and output both carry connection generations. Notifications execute on the host event queue, split by negotiated MTU, and transfer mbuf ownership once. Overflow faults/disconnects the session. Fixed queues and one worker are reused through reinitialization; listeners and the NPL event are released on deinit.
+
+Automatic advertising uses the original ESP-AT commands and GAP callback, retaining A002/A003 bookkeeping. BLEINIT runs once after AT initialization; advertising is configured, started and restarted after disconnect. Manual BLEINIT=0 remains usable. Internal capture uses permanent guarded storage, recognizes split responses, rejects concurrent calls, and quarantines timed-out work until its late terminal response. Command payloads are never logged. UART AT output is suppressed while raw and briefly during disconnect; normal AT is available outside the bridge.
+
+IDF is pinned to 4dbfecac7e3b196d3f6826b3db2fdd5a23708e0d. Its standard NPL event posting blocks indefinitely, so the service uses its FreeRTOS queue structures for a zero-timeout post. Recheck this shim before changing IDF.
 
 Host tests:
 
@@ -15,6 +21,11 @@ Host tests:
     gcc -std=c11 -Wall -Wextra -Werror -I main main/link_gpio_state.c tests/link_gpio_host_test.c -o /tmp/link_gpio_host_test
     /tmp/link_gpio_host_test
 
-All three commands pass. They cover fragmented authentication, configuration queries after TRANMD, raw +++ preservation, overlong and embedded-NUL recovery, unsupported baud reporting, negative GPIO disable, failed apply rollback, generation invalidation, and LINK lifecycle behavior.
+Additional tests execute actual production code against deterministic OS/driver mocks:
 
-The source-only checkout keeps SDK/build caches ignored. Physical BLE negotiation, UART transfer integrity, reset reboot, and factory-image merge are untested because no hardware is available. The installed pinned SDK path is /home/acer/.local/share/dual-codex/c6-setup-20261115/environment/project/esp-idf. With the supplied venv and compiler PATH, idf.py reaches dependency resolution but stops because the checkout has no managed cjson component and network access is unavailable; no component was downloaded.
+    python tests/controller_runtime_test.py
+    python tests/controller_self_cmd_test.py
+
+The runtime test covers a 258-byte binary frame with zero bytes and +++, config after TRANMD, MTU23 splitting, rejected second owners, stale queued input/output after handle reuse, auth reset, unsubscribe, fixed-resource reinit and overflow. The capture test covers split OK, ERROR, concurrent rejection, timeout quarantine and late completion. These tests do not prove radio timing or physical UART behavior.
+
+The Windows controller independently compiled source 68b7c613 with the installed pinned IDF on Acer, including the linked ELF and factory merge. Actual configuration/symbols confirmed full Wi-Fi AT, self commands, RTC internal RC, BLE main XTAL and LINK/air-service inclusion. Subsequent cleanup changes require another build before flashing. Hardware auto-advertising, air configuration, UART integrity and STM32 ROM operation remain pending until actually tested. The earlier worker's dependency-resolution limitation was resolved by using the existing environment/cached components; it was not evidence that Acer's environment was broken.

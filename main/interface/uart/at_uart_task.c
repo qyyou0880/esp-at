@@ -42,7 +42,7 @@ at_uart_port_pins_t g_uart_port_pin;
 
 static int32_t at_uart_write_data(uint8_t *data, int32_t len)
 {
-    if (air_ble_service_uart_active()) return len;
+    if (air_ble_service_uart_suppress()) return len;
     return uart_write_bytes(g_at_cmd_port, (char *)data, len);
 }
 
