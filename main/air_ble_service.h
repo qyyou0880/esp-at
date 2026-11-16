@@ -17,5 +17,6 @@ void air_ble_service_unregister(void);
 void air_ble_service_autostart(void);
 bool air_ble_service_uart_active(void);
 bool air_ble_service_uart_route(const uint8_t *data, size_t length);
+void air_ble_service_uart_fault(void);
 
 #endif

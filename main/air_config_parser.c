@@ -39,7 +39,10 @@ static int baud_code(uint32_t baudrate)
 {
     static const uint32_t rates[] = {2400, 4800, 9600, 14400, 19200, 38400, 57600, 115200};
     for (int i = 0; i < (int)(sizeof(rates) / sizeof(rates[0])); ++i)
-        if (rates[i] == baudrate) return i;
+        /* Hardware divisors quantize the requested baud (e.g. 115201 for
+         * 115200). Accept only a narrow 0.5% window around a supported code. */
+        if ((baudrate > rates[i] ? baudrate-rates[i] : rates[i]-baudrate) * 1000ULL
+            <= rates[i] * 5ULL) return i;
     return -1;
 }
 
@@ -85,7 +88,6 @@ static bool execute(air_config_session_t *s, char *cmd, const air_config_callbac
         if (!parse_decimal(cmd + 8, &code) || code < 0 || code > 7) goto bad;
         next.baudrate = rates[code];
         if (!cb->apply_uart || !cb->apply_uart(&next, cb->arg)) {
-            if (cb->apply_uart) (void)cb->apply_uart(&s->uart, cb->arg);
             goto apply_failed;
         }
         s->uart = next;
@@ -103,7 +105,6 @@ static bool execute(air_config_session_t *s, char *cmd, const air_config_callbac
         if (!parse_decimal(cmd + 8, &value) || (value != 0 && value != 1)) goto bad;
         next.parity = (uint8_t)value;
         if (!cb->apply_uart || !cb->apply_uart(&next, cb->arg)) {
-            if (cb->apply_uart) (void)cb->apply_uart(&s->uart, cb->arg);
             goto apply_failed;
         }
         s->uart = next;
@@ -119,7 +120,6 @@ static bool execute(air_config_session_t *s, char *cmd, const air_config_callbac
         air_uart_config_t next = s->uart;
         next.databits = 3;
         if (!cb->apply_uart || !cb->apply_uart(&next, cb->arg)) {
-            if (cb->apply_uart) (void)cb->apply_uart(&s->uart, cb->arg);
             goto apply_failed;
         }
         s->uart = next;
@@ -233,7 +233,8 @@ bool air_config_feed(air_config_session_t *s, const uint8_t *data, size_t length
                      uint32_t now_ms, const air_config_callbacks_t *cb)
 {
     if (!s || !data || !length) return false;
-    bool handled = false;
+    bool handled = air_config_flush_idle(s, now_ms, cb);
+    s->last_rx_ms = now_ms;
     for (size_t i = 0; i < length; ++i) {
         uint8_t ch = data[i];
         if (ch == '\r' || ch == '\n') {
@@ -249,7 +250,6 @@ bool air_config_feed(air_config_session_t *s, const uint8_t *data, size_t length
             continue;
         }
         if (s->discarding) continue;
-        if (s->raw_mode && s->pending_len == 0 && ch != 'A') continue;
         if (ch < 0x20 || ch > 0x7e) {
             s->pending_len = 0;
             s->discarding = true;

@@ -196,8 +196,21 @@ bool esp_at_link_gpio_configure(int gpio, bool save)
     bool ok = !s_powerdown && (gpio == -1 || link_gpio_pin_allowed(gpio));
     if (ok) ok = link_gpio_prepare_pin(gpio, s_state.active_count != 0);
     if (ok) ok = link_gpio_state_configure_persist(&s_state, gpio, save ? link_gpio_save_cb : NULL, NULL);
+    if (!ok && gpio >= 0 && gpio <= 30 && gpio != s_state.gpio && (s_owned_pins & (1ULL << gpio))) {
+        (void)gpio_set_level(gpio, 0);
+    }
     xSemaphoreGive(s_lock);
     return ok;
+}
+
+void esp_at_link_gpio_get_state(int *gpio, bool *high, unsigned *count, bool *fault)
+{
+    *gpio=-1; *high=false; *count=0; *fault=true;
+    if (!s_lock) return;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *gpio=s_state.gpio; *high=s_state.link_high;
+    *count=s_state.active_count; *fault=s_state.fault;
+    xSemaphoreGive(s_lock);
 }
 
 static uint8_t rtc_clock_query(uint8_t *cmd_name)

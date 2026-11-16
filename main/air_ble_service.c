@@ -1,13 +1,11 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "sdkconfig.h"
-
-#if defined(CONFIG_IDF_TARGET_ESP32C6) && defined(CONFIG_BT_NIMBLE_ENABLED)
 #include "air_ble_service.h"
+#if defined(CONFIG_IDF_TARGET_ESP32C6) && defined(CONFIG_BT_NIMBLE_ENABLED) && defined(CONFIG_AT_BASE_ON_UART) && defined(CONFIG_AT_SELF_COMMAND_SUPPORT)
 #include "air_config_parser.h"
 #include "esp_at.h"
 #include "at_uart.h"
 #include "esp_at_link_gpio.h"
-#include "esp_log.h"
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -15,287 +13,392 @@
 #include "host/ble_gatt.h"
 #include "host/ble_att.h"
 #include "host/ble_hs.h"
-#include "host/ble_hs_adv.h"
 #include "host/ble_uuid.h"
-#include "nimble/ble.h"
+#include "nimble/nimble_port.h"
+#include "nimble/npl_freertos.h"
 #include "os/os_mbuf.h"
 #include <string.h>
 
-#define AIR_EVENT 0xffffU
-#define AIR_NOTIFY_OFF 0xfffeU
-#define AIR_RAW_MAX 512U
+#define AIR_SESSION 0xffff
+#define AIR_RAW_ON 0xfffe
+#define AIR_RAW_OFF 0xfffd
+#define AIR_MAX_DATA 512
 typedef struct {
-    uint16_t conn_handle;
+    uint16_t conn, channel, length;
     uint32_t generation;
-    uint16_t channel;
-    uint16_t length;
-    uint8_t data[AIR_RAW_MAX];
-} air_ble_work_t;
-
-static const char *TAG = "air-ble";
-static QueueHandle_t s_queue;
-static TaskHandle_t s_worker;
-static air_config_session_t s_session;
-static volatile uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
-static volatile uint32_t s_generation;
-static volatile bool s_adv_pending;
-static volatile bool s_reset_pending;
-static uint16_t s_config_val_handle;
-static uint16_t s_notify_val_handle;
+    uint8_t data[AIR_MAX_DATA];
+} air_message_t;
+static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+static QueueHandle_t s_input, s_output;
+static TaskHandle_t s_worker, s_manager;
+static struct ble_npl_event s_output_event;
 static struct ble_gap_event_listener s_listener;
-static bool s_registered;
+static uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE, s_raw_handle, s_config_handle;
+static uint32_t s_generation;
+static bool s_registered, s_raw, s_adv_pending, s_configured;
+static bool s_failed;
+static uint32_t s_fault_generation;
+static bool s_fault;
+/* Only the worker reads or writes parser state. Host/UART share guarded metadata. */
+static air_config_session_t s_session;
+static air_message_t s_context;
+static TickType_t s_reset_at;
 
-static void enqueue_event(uint16_t conn, uint32_t generation, uint16_t event)
+static bool valid(uint16_t conn, uint32_t generation)
 {
-    air_ble_work_t item = {.conn_handle = conn, .generation = generation, .channel = event};
-    if (!s_queue || xQueueSend(s_queue, &item, 0) != pdTRUE)
-        ESP_LOGW(TAG, "BLE session event queue full");
+    portENTER_CRITICAL(&s_lock);
+    bool yes = s_registered && !s_failed && s_conn == conn && s_generation == generation;
+    portEXIT_CRITICAL(&s_lock);
+    return yes;
+}
+
+static void signal_host(void)
+{
+    /* Pinned IDF NPL's public eventq_put uses portMAX_DELAY. Use its documented
+     * FreeRTOS structures here to keep posting bounded during host shutdown. */
+    portENTER_CRITICAL(&s_lock);
+    if (s_registered) {
+        struct ble_npl_event_freertos *event=s_output_event.event;
+        struct ble_npl_eventq_freertos *queue=nimble_port_get_dflt_eventq()->eventq;
+        if (!event->queued) {
+            event->queued=true;
+            struct ble_npl_event *pointer=&s_output_event;
+            if (xQueueSend(queue->q,&pointer,0) != pdTRUE) {
+                event->queued=false;
+                s_fault=true; s_fault_generation=s_generation; s_failed=true;
+            }
+        }
+    }
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static void fail_session(uint32_t generation)
+{
+    portENTER_CRITICAL(&s_lock);
+    if (s_registered && generation == s_generation) {
+        s_fault = true; s_fault_generation = generation; s_failed = true;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    /* Worker posts the fault; never block a GATT callback on the host queue. */
+}
+
+static void host_output(struct ble_npl_event *event)
+{
+    (void)event;
+    portENTER_CRITICAL(&s_lock);
+    bool fault = s_fault && s_fault_generation == s_generation;
+    uint16_t conn = s_conn;
+    s_fault = false;
+    portEXIT_CRITICAL(&s_lock);
+    if (fault && conn != BLE_HS_CONN_HANDLE_NONE)
+        (void)ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
+    air_message_t item;
+    while (xQueueReceive(s_output, &item, 0) == pdTRUE) {
+        /* Runs on the same host event queue as GAP disconnect/handle reuse. */
+        if (!valid(item.conn, item.generation)) continue;
+        size_t mtu = ble_att_mtu(item.conn);
+        size_t limit = mtu > 3 ? mtu - 3 : 20;
+        for (size_t offset = 0; offset < item.length; ) {
+            size_t size = item.length - offset;
+            if (size > limit) size = limit;
+            struct os_mbuf *om = ble_hs_mbuf_from_flat(item.data + offset, size);
+            if (!om || ble_gatts_notify_custom(item.conn, item.channel, om) != 0) {
+                /* notify_custom owns om on both success and failure. */
+                (void)ble_gap_terminate(item.conn, BLE_ERR_REM_USER_CONN_TERM);
+                break;
+            }
+            offset += size;
+        }
+    }
+}
+
+static bool output(uint16_t conn, uint32_t generation, uint16_t handle,
+                   const uint8_t *data, size_t length)
+{
+    if (!valid(conn, generation) || !length || length > AIR_MAX_DATA) return false;
+    air_message_t item = {.conn=conn,.generation=generation,.channel=handle,.length=length};
+    memcpy(item.data, data, length);
+    if (xQueueSend(s_output, &item, 0) != pdTRUE) {
+        fail_session(generation); return false;
+    }
+    return true;
+}
+
+static bool enqueue(uint16_t conn, uint32_t generation, uint16_t channel,
+                    const uint8_t *data, size_t length)
+{
+    air_message_t item = {.conn=conn,.generation=generation,.channel=channel,.length=length};
+    if (length) memcpy(item.data, data, length);
+    if (xQueueSend(s_input, &item, 0) == pdTRUE) return true;
+    fail_session(generation);
+    return false;
+}
+
+static bool claim(uint16_t conn, uint32_t *generation)
+{
+    bool fresh = false;
+    portENTER_CRITICAL(&s_lock);
+    if (!s_registered || s_failed || (s_conn != BLE_HS_CONN_HANDLE_NONE && s_conn != conn)) {
+        portEXIT_CRITICAL(&s_lock); return false;
+    }
+    if (s_conn == BLE_HS_CONN_HANDLE_NONE) {
+        s_conn = conn; ++s_generation; s_raw = false; fresh = true;
+    }
+    *generation = s_generation;
+    portEXIT_CRITICAL(&s_lock);
+    return !fresh || enqueue(conn, *generation, AIR_SESSION, NULL, 0);
 }
 
 static int gap_event(struct ble_gap_event *event, void *arg)
 {
     (void)arg;
-    if (event->type == BLE_GAP_EVENT_CONNECT && event->connect.status == 0) {
-        uint32_t generation = ++s_generation;
-        s_conn = event->connect.conn_handle;
-        enqueue_event(s_conn, generation, AIR_EVENT);
-    } else if (event->type == BLE_GAP_EVENT_DISCONNECT &&
-               event->disconnect.conn.conn_handle == s_conn) {
-        uint32_t generation = ++s_generation;
-        s_conn = BLE_HS_CONN_HANDLE_NONE;
+    if (event->type == BLE_GAP_EVENT_DISCONNECT) {
+        portENTER_CRITICAL(&s_lock);
+        if (s_conn == event->disconnect.conn.conn_handle) {
+            s_conn = BLE_HS_CONN_HANDLE_NONE; ++s_generation; s_raw = false; s_failed = false;
+        }
         s_adv_pending = true;
-        enqueue_event(event->disconnect.conn.conn_handle, generation, AIR_EVENT);
+        portEXIT_CRITICAL(&s_lock);
+    } else if (event->type == BLE_GAP_EVENT_CONNECT && event->connect.status != 0) {
+        portENTER_CRITICAL(&s_lock); s_adv_pending = true; portEXIT_CRITICAL(&s_lock);
     } else if (event->type == BLE_GAP_EVENT_SUBSCRIBE &&
-               event->subscribe.conn_handle == s_conn &&
-               event->subscribe.attr_handle == s_notify_val_handle) {
-        enqueue_event(event->subscribe.conn_handle, s_generation,
-                      event->subscribe.cur_notify ? AIR_BLE_NOTIFY_UUID16 : AIR_NOTIFY_OFF);
+               event->subscribe.attr_handle == s_raw_handle) {
+        uint32_t generation;
+        if (event->subscribe.cur_notify) {
+            if (!claim(event->subscribe.conn_handle, &generation)) return 0;
+            /* Suppress AT output before CCCD acknowledgement reaches the client. */
+            portENTER_CRITICAL(&s_lock); s_raw = true; portEXIT_CRITICAL(&s_lock);
+            enqueue(event->subscribe.conn_handle, generation, AIR_RAW_ON, NULL, 0);
+        } else {
+            portENTER_CRITICAL(&s_lock);
+            bool owner = s_conn == event->subscribe.conn_handle;
+            generation = s_generation;
+            if (owner) s_raw = false;
+            portEXIT_CRITICAL(&s_lock);
+            if (owner) enqueue(event->subscribe.conn_handle, generation, AIR_RAW_OFF, NULL, 0);
+        }
     }
     return 0;
 }
 
-static void air_reply(const char *response, size_t length, void *arg)
+static bool current_uart(uart_config_t *config)
 {
-    (void)arg;
-    uint16_t conn = s_conn;
-    if (conn == BLE_HS_CONN_HANDLE_NONE) return;
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(response, length);
-    if (!om) { (void)ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM); return; }
-    if (ble_gatts_notify_custom(conn, s_config_val_handle, om) != 0)
-        (void)ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
+    at_uart_config_init(config);
+    (void)at_nvs_uart_config_get(config);
+    uint32_t rate;
+    uart_port_t port = at_uart_port_get();
+    if (uart_get_baudrate(port, &rate) != ESP_OK ||
+        uart_get_word_length(port, &config->data_bits) != ESP_OK ||
+        uart_get_parity(port, &config->parity) != ESP_OK ||
+        uart_get_stop_bits(port, &config->stop_bits) != ESP_OK ||
+        uart_get_hw_flow_ctrl(port, &config->flow_ctrl) != ESP_OK) return false;
+    config->baud_rate = rate;
+    return true;
+}
+
+static void refresh_uart(void)
+{
+    uart_config_t config;
+    if (!current_uart(&config)) return;
+    s_session.uart.baudrate = config.baud_rate;
+    s_session.uart.parity = config.parity == UART_PARITY_EVEN ? 1 :
+        config.parity == UART_PARITY_DISABLE ? 0 : 255;
+    s_session.uart.databits = config.data_bits == UART_DATA_8_BITS ? 3 : 255;
+}
+
+static void reply(const char *text, size_t length, void *arg)
+{
+    air_message_t *ctx = arg;
+    (void)output(ctx->conn,ctx->generation,s_config_handle,(const uint8_t *)text,length);
 }
 
 static bool apply_uart(const air_uart_config_t *config, void *arg)
 {
-    (void)arg;
+    air_message_t *ctx = arg;
     uart_config_t previous, next;
-    at_uart_config_init(&previous);
-    (void)at_nvs_uart_config_get(&previous);
-    uint32_t actual_baud = 0;
-    if (uart_get_baudrate(at_uart_port_get(), &actual_baud) == ESP_OK) previous.baud_rate = actual_baud;
+    if (!valid(ctx->conn,ctx->generation) || !current_uart(&previous) ||
+        uart_wait_tx_done(at_uart_port_get(),pdMS_TO_TICKS(1000)) != ESP_OK) return false;
     next = previous;
-    next.baud_rate = config->baudrate;
-    next.data_bits = UART_DATA_8_BITS;
+    next.baud_rate = config->baudrate; next.data_bits = UART_DATA_8_BITS;
     next.parity = config->parity ? UART_PARITY_EVEN : UART_PARITY_DISABLE;
-    if (uart_param_config(at_uart_port_get(), &next) != ESP_OK) return false;
-    if (!at_nvs_uart_config_set_checked(&next)) {
-        (void)uart_param_config(at_uart_port_get(), &previous);
-        (void)at_nvs_uart_config_set_checked(&previous);
-        return false;
-    }
-    return true;
+    next.stop_bits = UART_STOP_BITS_1; next.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+    if (uart_param_config(at_uart_port_get(),&next) != ESP_OK) return false;
+    if (at_nvs_uart_config_set_checked(&next)) return true;
+    if (uart_param_config(at_uart_port_get(),&previous) != ESP_OK) fail_session(ctx->generation);
+    return false;
 }
 
 static bool apply_link(int gpio, bool save, void *arg)
 {
-    (void)arg;
-    return esp_at_link_gpio_configure(gpio, save);
+    air_message_t *ctx = arg;
+    return valid(ctx->conn,ctx->generation) && esp_at_link_gpio_configure(gpio,save);
 }
 
-static bool request_reset(void *arg)
+static bool reset(void *arg)
 {
-    (void)arg;
-    s_reset_pending = true;
+    air_message_t *ctx = arg;
+    if (!valid(ctx->conn,ctx->generation)) return false;
+    s_reset_at = xTaskGetTickCount() + pdMS_TO_TICKS(200);
+    if (!s_reset_at) s_reset_at = 1;
     return true;
-}
-
-static void start_advertising(void)
-{
-    static const char name[] = "SeisTech-C6";
-    static ble_uuid16_t uuid = {.u = {.type = BLE_UUID_TYPE_16}, .value = AIR_BLE_SERVICE_UUID16};
-    struct ble_hs_adv_fields fields = {0};
-    fields.name = (uint8_t *)name;
-    fields.name_len = sizeof(name) - 1;
-    fields.name_is_complete = 1;
-    fields.uuids16 = &uuid;
-    fields.num_uuids16 = 1;
-    fields.uuids16_is_complete = 1;
-    struct ble_gap_adv_params params = {0};
-    params.conn_mode = BLE_GAP_CONN_MODE_UND;
-    params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    if (ble_gap_adv_set_fields(&fields) == 0 &&
-        ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &params, NULL, NULL) == 0)
-        s_adv_pending = false;
 }
 
 static void worker(void *arg)
 {
     (void)arg;
-    const air_config_callbacks_t callbacks = {
-        .apply_uart = apply_uart, .apply_link = apply_link, .request_reset = request_reset,
-        .reply = air_reply, .arg = NULL, .auth_password = AIR_CONFIG_AUTH_DEFAULT,
-    };
-    start_advertising();
+    air_config_callbacks_t callbacks = {.apply_uart=apply_uart,.apply_link=apply_link,
+        .request_reset=reset,.reply=reply,.arg=&s_context};
     for (;;) {
-        air_ble_work_t item;
-        if (s_adv_pending && s_conn == BLE_HS_CONN_HANDLE_NONE) start_advertising();
-        if (xQueueReceive(s_queue, &item, pdMS_TO_TICKS(AIR_CONFIG_IDLE_DELIMITER_MS)) == pdTRUE) {
-            if (item.channel == AIR_EVENT) {
-                if (item.generation == s_generation)
-                    air_config_session_disconnect(&s_session, item.generation);
-                continue;
-            }
-            if (item.channel == AIR_NOTIFY_OFF) {
-                if (item.generation == s_generation) air_config_set_notify_armed(&s_session, false);
-                continue;
-            }
-            if (!air_config_generation_valid(&s_session, item.generation) ||
-                item.conn_handle != s_conn) continue;
-            if (item.channel == AIR_BLE_NOTIFY_UUID16) {
-                air_config_set_notify_armed(&s_session, true);
+        portENTER_CRITICAL(&s_lock); bool fault = s_fault; portEXIT_CRITICAL(&s_lock);
+        if (fault || uxQueueMessagesWaiting(s_output)) signal_host();
+        air_message_t item;
+        if (xQueueReceive(s_input,&item,pdMS_TO_TICKS(10)) == pdTRUE) {
+            if (!valid(item.conn,item.generation)) continue;
+            s_context.conn = item.conn; s_context.generation = item.generation;
+            if (item.channel == AIR_SESSION) {
+                air_config_session_init(&s_session,NULL,item.generation);
+                refresh_uart();
+            } else if (item.channel == AIR_RAW_ON) {
+                /* Do not flush here: the first ROM ACK must remain readable. */
+                if (uart_disable_pattern_det_intr(at_uart_port_get()) != ESP_OK)
+                    fail_session(item.generation);
+                air_config_set_notify_armed(&s_session,true);
+            } else if (item.channel == AIR_RAW_OFF) {
+                air_config_set_notify_armed(&s_session,false);
             } else if (item.channel == AIR_BLE_CONFIG_UUID16) {
-                (void)air_config_feed(&s_session, item.data, item.length,
-                                      xTaskGetTickCount() * portTICK_PERIOD_MS, &callbacks);
-            } else if (item.channel == AIR_BLE_WRITE_UUID16 && s_session.raw_mode &&
-                       s_session.notify_armed) {
-                if (uart_write_bytes(at_uart_port_get(), (const char *)item.data, item.length) != item.length)
-                    (void)ble_gap_terminate(item.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-            }
-        } else if (s_conn != BLE_HS_CONN_HANDLE_NONE) {
-            (void)air_config_flush_idle(&s_session, xTaskGetTickCount() * portTICK_PERIOD_MS, &callbacks);
+                refresh_uart();
+                int gpio; bool high, fault; unsigned count;
+                esp_at_link_gpio_get_state(&gpio,&high,&count,&fault);
+                air_config_set_link_state(&s_session,gpio,high,count,fault);
+                air_config_feed(&s_session,item.data,item.length,
+                    xTaskGetTickCount()*portTICK_PERIOD_MS,&callbacks);
+            } else if (item.channel == AIR_BLE_WRITE_UUID16 && s_session.notify_armed) {
+                if (uart_write_bytes(at_uart_port_get(),item.data,item.length) != item.length ||
+                    uart_wait_tx_done(at_uart_port_get(),pdMS_TO_TICKS(1000)) != ESP_OK)
+                    fail_session(item.generation);
+            } else fail_session(item.generation);
         }
-        if (s_reset_pending) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-            esp_at_restart();
-            s_reset_pending = false;
-        }
+        if (valid(s_context.conn,s_context.generation))
+            air_config_flush_idle(&s_session,xTaskGetTickCount()*portTICK_PERIOD_MS,&callbacks);
+        if (s_reset_at && (int32_t)(xTaskGetTickCount()-s_reset_at) >= 0) esp_at_restart();
     }
 }
 
-static int access_cb(uint16_t conn_handle, uint16_t attr_handle,
-                     struct ble_gatt_access_ctxt *ctxt, void *arg)
+static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    (void)attr_handle;
+    (void)attr;
     uint16_t channel = (uintptr_t)arg;
     size_t length = OS_MBUF_PKTLEN(ctxt->om);
-    size_t limit = channel == AIR_BLE_CONFIG_UUID16 ? AIR_CONFIG_MAX_COMMAND : AIR_RAW_MAX;
-    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR || !s_queue || !length || length > limit)
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR || !length ||
+        length > (channel == AIR_BLE_CONFIG_UUID16 ? AIR_CONFIG_MAX_COMMAND : AIR_MAX_DATA))
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-    air_ble_work_t item = {.conn_handle = conn_handle, .generation = s_generation,
-                           .channel = channel, .length = length};
-    if (os_mbuf_copydata(ctxt->om, 0, length, item.data) != 0 ||
-        xQueueSend(s_queue, &item, 0) != pdTRUE)
-        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    uint32_t generation;
+    if (!claim(conn,&generation)) return BLE_ATT_ERR_INSUFFICIENT_RES;
+    uint8_t data[AIR_MAX_DATA];
+    if (os_mbuf_copydata(ctxt->om,0,length,data) != 0 ||
+        !enqueue(conn,generation,channel,data,length)) return BLE_ATT_ERR_INSUFFICIENT_RES;
     return 0;
 }
 
 static const struct ble_gatt_svc_def s_services[] = {
-    {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = BLE_UUID16_DECLARE(AIR_BLE_SERVICE_UUID16),
-     .characteristics = (struct ble_gatt_chr_def[]) {
-        {.uuid = BLE_UUID16_DECLARE(AIR_BLE_NOTIFY_UUID16), .access_cb = access_cb,
-         .arg = (void *)(uintptr_t)AIR_BLE_NOTIFY_UUID16, .flags = BLE_GATT_CHR_F_NOTIFY,
-         .val_handle = &s_notify_val_handle},
-        {.uuid = BLE_UUID16_DECLARE(AIR_BLE_WRITE_UUID16), .access_cb = access_cb,
-         .arg = (void *)(uintptr_t)AIR_BLE_WRITE_UUID16,
-         .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP},
-        {.uuid = BLE_UUID16_DECLARE(AIR_BLE_CONFIG_UUID16), .access_cb = access_cb,
-         .arg = (void *)(uintptr_t)AIR_BLE_CONFIG_UUID16,
-         .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_NOTIFY,
-         .val_handle = &s_config_val_handle},
-        {0}
-    }},
-    {0}
-};
+    {.type=BLE_GATT_SVC_TYPE_PRIMARY,.uuid=BLE_UUID16_DECLARE(AIR_BLE_SERVICE_UUID16),
+     .characteristics=(struct ble_gatt_chr_def[]) {
+        {.uuid=BLE_UUID16_DECLARE(AIR_BLE_NOTIFY_UUID16),.access_cb=access_cb,
+         .flags=BLE_GATT_CHR_F_NOTIFY,.val_handle=&s_raw_handle},
+        {.uuid=BLE_UUID16_DECLARE(AIR_BLE_WRITE_UUID16),.access_cb=access_cb,
+         .arg=(void *)(uintptr_t)AIR_BLE_WRITE_UUID16,
+         .flags=BLE_GATT_CHR_F_WRITE|BLE_GATT_CHR_F_WRITE_NO_RSP},
+        {.uuid=BLE_UUID16_DECLARE(AIR_BLE_CONFIG_UUID16),.access_cb=access_cb,
+         .arg=(void *)(uintptr_t)AIR_BLE_CONFIG_UUID16,.val_handle=&s_config_handle,
+         .flags=BLE_GATT_CHR_F_WRITE|BLE_GATT_CHR_F_WRITE_NO_RSP|BLE_GATT_CHR_F_NOTIFY},
+        {0}}}, {0}};
 
 bool air_ble_service_register(void)
 {
-    if (s_registered) return true;
-    if (ble_gatts_count_cfg(s_services) != 0 || ble_gatts_add_svcs(s_services) != 0) return false;
-    s_queue = xQueueCreate(16, sizeof(air_ble_work_t));
-    if (!s_queue || xTaskCreate(worker, "air-ble", 6144, NULL, 5, &s_worker) != pdPASS) return false;
-    air_uart_config_t initial = {115200, 0, 3};
-    uart_config_t actual;
-    at_uart_config_init(&actual);
-    if (at_nvs_uart_config_get(&actual)) {
-        initial.baudrate = actual.baud_rate;
-        initial.parity = actual.parity == UART_PARITY_EVEN;
-        initial.databits = actual.data_bits == UART_DATA_8_BITS ? 3 : actual.data_bits;
-    }
-    uint32_t actual_baud = 0;
-    if (uart_get_baudrate(at_uart_port_get(), &actual_baud) == ESP_OK) initial.baudrate = actual_baud;
-    air_config_session_init(&s_session, &initial, ++s_generation);
-    if (ble_gap_event_listener_register(&s_listener, gap_event, NULL) != 0) return false;
-    s_registered = true;
+    if (!s_input) s_input=xQueueCreate(16,sizeof(air_message_t));
+    if (!s_output) s_output=xQueueCreate(32,sizeof(air_message_t));
+    if (!s_input || !s_output) return false;
+    if (!s_worker && xTaskCreate(worker,"air-uart",6144,NULL,5,&s_worker) != pdPASS) return false;
+    if (ble_gatts_count_cfg(s_services) || ble_gatts_add_svcs(s_services)) return false;
+    xQueueReset(s_input); xQueueReset(s_output);
+    ble_npl_event_init(&s_output_event,host_output,NULL);
+    if (ble_gap_event_listener_register(&s_listener,gap_event,NULL)) return false;
+    portENTER_CRITICAL(&s_lock);
+    s_conn=BLE_HS_CONN_HANDLE_NONE; ++s_generation; s_raw=false;
+    s_configured=false; s_adv_pending=true; s_registered=true; s_fault=false; s_failed=false;
+    portEXIT_CRITICAL(&s_lock);
     return true;
 }
 
 void air_ble_service_unregister(void)
 {
-    if (!s_registered) return;
+    portENTER_CRITICAL(&s_lock);
+    s_registered=false; s_raw=false; ++s_generation; s_conn=BLE_HS_CONN_HANDLE_NONE;
+    portEXIT_CRITICAL(&s_lock);
     (void)ble_gap_event_listener_unregister(&s_listener);
-    s_registered = false;
-    s_conn = BLE_HS_CONN_HANDLE_NONE;
-    ++s_generation;
-    if (s_worker) { vTaskDelete(s_worker); s_worker = NULL; }
-    if (s_queue) { vQueueDelete(s_queue); s_queue = NULL; }
+    /* Fixed queues/worker are reused across reinit; no per-reinit allocation. */
 }
 
 bool air_ble_service_uart_active(void)
 {
-    return s_conn != BLE_HS_CONN_HANDLE_NONE && s_session.raw_mode && s_session.notify_armed;
+    portENTER_CRITICAL(&s_lock);
+    bool active=s_registered && s_conn!=BLE_HS_CONN_HANDLE_NONE && s_raw;
+    portEXIT_CRITICAL(&s_lock);
+    return active;
 }
 
 bool air_ble_service_uart_route(const uint8_t *data, size_t length)
 {
-    uint16_t conn = s_conn;
-    if (!air_ble_service_uart_active() || !data || !length) return false;
-    size_t chunk_size = ble_att_mtu(conn);
-    chunk_size = chunk_size > 3 ? chunk_size - 3 : 20;
-    while (length) {
-        size_t chunk = length < chunk_size ? length : chunk_size;
-        struct os_mbuf *om = ble_hs_mbuf_from_flat(data, chunk);
-        if (!om || ble_gatts_notify_custom(conn, s_notify_val_handle, om) != 0) {
-            (void)ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
-            return false;
-        }
-        data += chunk;
-        length -= chunk;
-    }
-    return true;
+    portENTER_CRITICAL(&s_lock);
+    uint16_t conn=s_conn; uint32_t generation=s_generation; bool active=s_raw && s_registered;
+    portEXIT_CRITICAL(&s_lock);
+    return active && output(conn,generation,s_raw_handle,data,length);
 }
 
-#if defined(CONFIG_AT_SELF_COMMAND_SUPPORT)
-static void autostart_task(void *arg)
+void air_ble_service_uart_fault(void)
+{
+    portENTER_CRITICAL(&s_lock); uint32_t generation=s_generation; portEXIT_CRITICAL(&s_lock);
+    fail_session(generation);
+}
+
+static void manager(void *arg)
 {
     (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(100));
-    (void)esp_at_exe_cmd("AT+BLEINIT=2\r\n", "OK", 3000);
-    vTaskDelete(NULL);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    /* Use the ESP-AT GAP callback, retaining legacy connection/SPP bookkeeping. */
+    (void)esp_at_exe_cmd("AT+BLEINIT=2\r\n","\r\nOK\r\n",5000);
+    for (;;) {
+        portENTER_CRITICAL(&s_lock);
+        bool registered=s_registered, configured=s_configured, pending=s_adv_pending;
+        uint32_t generation=s_generation;
+        portEXIT_CRITICAL(&s_lock);
+        if (registered && ble_hs_synced()) {
+            if (!configured) {
+                bool ok=esp_at_exe_cmd("AT+BLEADVPARAM=50,50,0,0,7,0,,\r\n","\r\nOK\r\n",2000)==ESP_OK &&
+                    esp_at_exe_cmd("AT+BLEADVDATA=\"0201060C0953656973546563682D43360303F0FF\"\r\n","\r\nOK\r\n",2000)==ESP_OK;
+                portENTER_CRITICAL(&s_lock);
+                if (s_registered && generation==s_generation) s_configured=ok;
+                portEXIT_CRITICAL(&s_lock);
+            } else if (pending) {
+                bool ok=esp_at_exe_cmd("AT+BLEADVSTART\r\n","\r\nOK\r\n",2000)==ESP_OK;
+                portENTER_CRITICAL(&s_lock);
+                if (ok && s_registered && generation==s_generation) s_adv_pending=false;
+                portEXIT_CRITICAL(&s_lock);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
 }
-#endif
 
 void air_ble_service_autostart(void)
 {
-#if defined(CONFIG_AT_SELF_COMMAND_SUPPORT)
-    (void)xTaskCreate(autostart_task, "air-ble-start", 4096, NULL, 4, NULL);
-#endif
+    if (!s_manager) (void)xTaskCreate(manager,"air-start",4096,NULL,4,&s_manager);
 }
-
 #else
-#include "air_ble_service.h"
-bool air_ble_service_register(void) { return true; }
-void air_ble_service_unregister(void) {}
-void air_ble_service_autostart(void) {}
-bool air_ble_service_uart_active(void) { return false; }
-bool air_ble_service_uart_route(const uint8_t *data, size_t length) { (void)data; (void)length; return false; }
+bool air_ble_service_register(void){return true;}
+void air_ble_service_unregister(void){}
+void air_ble_service_autostart(void){}
+bool air_ble_service_uart_active(void){return false;}
+bool air_ble_service_uart_route(const uint8_t *data,size_t length){(void)data;(void)length;return false;}
+void air_ble_service_uart_fault(void){}
 #endif
