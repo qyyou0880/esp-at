@@ -172,6 +172,7 @@ int main(void)
  ble_length=0;memset(ble_output,0,sizeof(ble_output));config("AT+AUTH=123456");
  config("AT+TRANMD=1");config("AT+BAUD?");assert(strstr((char*)ble_output,"+OK=7"));assert(!uart_length);
  subscribe(true);assert(air_ble_service_uart_active());
+ config("AT+BOOTRST=10,11,1");config("AT+BOOTMODE=1");assert(!uart_length);
  uint8_t frame[258];for(unsigned i=0;i<sizeof(frame);i++)frame[i]=i;memcpy(frame+30,"+++",3);
  assert(!send_data(1,AIR_BLE_WRITE_UUID16,frame,sizeof(frame)));drain();assert(uart_length==258&&!memcmp(frame,uart_output,258));
  ble_length=0;notify_count=0;assert(air_ble_service_uart_route(frame,sizeof(frame)));drain();assert(ble_length==258&&!memcmp(frame,ble_output,258));assert(notify_count==13&&last_handle==s_raw_handle);

@@ -29,7 +29,8 @@ static bool bootrst_configure_locked(int boot,int reset,bool enabled,bool persis
         /* Never turn a push-pull LINK output into NRST while it is high. */
         if (reset==s_state.gpio) return false;
         if (gpio_set_level(boot,0)!=ESP_OK || !link_gpio_prepare_pin(boot,false)) return false;
-        if (gpio_set_level(reset,1)!=ESP_OK) return false;
+        if (gpio_set_direction(reset,GPIO_MODE_INPUT)!=ESP_OK ||
+            gpio_set_level(reset,1)!=ESP_OK) return false;
         gpio_config_t cfg={.pin_bit_mask=1ULL<<reset,.mode=GPIO_MODE_OUTPUT_OD,
             .pull_up_en=GPIO_PULLUP_DISABLE,.pull_down_en=GPIO_PULLDOWN_DISABLE,
             .intr_type=GPIO_INTR_DISABLE};

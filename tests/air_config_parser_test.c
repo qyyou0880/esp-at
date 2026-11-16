@@ -9,7 +9,7 @@ static void out(const char *s, size_t n, void *arg) { mock_t *m = arg; if (m->le
 static bool apply_uart(const air_uart_config_t *c, void *arg) { mock_t *m = arg; (void)c; ++m->applies; return m->apply_ok; }
 static bool apply_link(int gpio, bool save, void *arg) { (void)gpio; (void)save; return ((mock_t *)arg)->apply_ok; }
 static bool reset(void *arg) { ((mock_t *)arg)->reset = true; return true; }
-static air_config_callbacks_t cb(mock_t *m) { return (air_config_callbacks_t){apply_uart, apply_link, reset, out, m, NULL}; }
+static air_config_callbacks_t cb(mock_t *m) { return (air_config_callbacks_t){.apply_uart=apply_uart,.apply_link=apply_link,.request_reset=reset,.reply=out,.arg=m}; }
 
 int main(void)
 {
