@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 #define AIR_CONFIG_MAX_COMMAND 96
-#define AIR_CONFIG_IDLE_DELIMITER_MS 30
+#define AIR_CONFIG_IDLE_DELIMITER_MS 100
 #define AIR_CONFIG_AUTH_DEFAULT "123456"
 
 typedef struct {

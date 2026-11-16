@@ -29,7 +29,8 @@ ESP-AT A002/A003 services must not be broken/replaced.
 Config commands are ASCII writes to FFF3, at most 96 bytes, accepted with optional
 trailing CRLF. A single command may be split across multiple <=20 byte writes:
 the current client sends e.g. AT+AUTH=xxxxxx without CRLF. Implement bounded
-assembly and a short idle delimiter (e.g. 30ms), not "execute every fragment".
+assembly and a 100ms idle delimiter, not "execute every fragment". The initial
+30ms trial split valid authentication fragments on the real BlueZ/C6 link.
 Support newline-delimited multiple commands without mixing notifications.
 Responses must end CRLF; success is `+OK` or `+OK=<value>`; failure `+ERR=<reason>`.
 Never log authentication payloads, passwords or internal commands containing them.

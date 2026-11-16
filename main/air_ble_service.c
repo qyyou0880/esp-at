@@ -147,6 +147,11 @@ static bool claim(uint16_t conn, uint32_t *generation)
     }
     *generation = s_generation;
     portEXIT_CRITICAL(&s_lock);
+    if (fresh) {
+        struct ble_gap_upd_params params={.itvl_min=6,.itvl_max=12,.latency=0,
+            .supervision_timeout=500,.min_ce_len=0,.max_ce_len=0};
+        (void)ble_gap_update_params(conn,&params);
+    }
     return !fresh || enqueue(conn, *generation, AIR_SESSION, NULL, 0);
 }
 

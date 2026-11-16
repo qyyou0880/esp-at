@@ -81,6 +81,8 @@ void ble_npl_event_deinit(struct ble_npl_event*);
 int ble_gap_event_listener_register(struct ble_gap_event_listener*,int(*)(struct ble_gap_event*,void*),void*);
 int ble_gap_event_listener_unregister(struct ble_gap_event_listener*);
 int ble_gap_terminate(uint16_t,int);
+struct ble_gap_upd_params {unsigned itvl_min,itvl_max,latency,supervision_timeout,min_ce_len,max_ce_len;};
+int ble_gap_update_params(uint16_t,const struct ble_gap_upd_params*);
 int ble_hs_synced(void);
 unsigned ble_att_mtu(uint16_t);
 struct os_mbuf {unsigned length;uint8_t data[512];};
@@ -143,6 +145,7 @@ void ble_npl_event_deinit(struct ble_npl_event*e){e->event=NULL;}
 int ble_gap_event_listener_register(struct ble_gap_event_listener*l,int(*cb)(struct ble_gap_event*,void*),void*a){(void)l;(void)cb;(void)a;return 0;}
 int ble_gap_event_listener_unregister(struct ble_gap_event_listener*l){(void)l;return 0;}
 int ble_gap_terminate(uint16_t c,int r){(void)c;(void)r;++terminations;return 0;}
+int ble_gap_update_params(uint16_t c,const struct ble_gap_upd_params*p){(void)c;assert(p->itvl_min==6&&p->itvl_max==12);return 0;}
 int ble_hs_synced(void){return 1;}
 unsigned ble_att_mtu(uint16_t c){(void)c;return 23;}
 struct os_mbuf *ble_hs_mbuf_from_flat(const void*d,size_t n){struct os_mbuf*m=malloc(sizeof(*m));m->length=n;memcpy(m->data,d,n);return m;}
@@ -150,7 +153,7 @@ int os_mbuf_copydata(struct os_mbuf*m,unsigned off,unsigned n,void*d){memcpy(d,m
 int ble_gatts_notify_custom(uint16_t c,uint16_t h,struct os_mbuf*m){(void)c;assert(m->length<=20);assert(ble_length+m->length<sizeof(ble_output));memcpy(ble_output+ble_length,m->data,m->length);ble_length+=m->length;last_handle=h;notify_count++;free(m);return 0;}
 int ble_gatts_count_cfg(const struct ble_gatt_svc_def*d){(void)d;return 0;}
 int ble_gatts_add_svcs(const struct ble_gatt_svc_def*d){uint16_t h=20;for(struct ble_gatt_chr_def*c=d->characteristics;c->uuid;c++,h++)if(c->val_handle)*c->val_handle=h;return 0;}
-static void drain(void){while(uxQueueMessagesWaiting(s_input))worker_step();ticks+=40;worker_step();worker_step();struct ble_npl_event*e;while(xQueueReceive(hostinner.q,&e,0)){((struct ble_npl_event_freertos*)e->event)->queued=false;e->callback(e);}}
+static void drain(void){while(uxQueueMessagesWaiting(s_input))worker_step();ticks+=AIR_CONFIG_IDLE_DELIMITER_MS+10;worker_step();worker_step();struct ble_npl_event*e;while(xQueueReceive(hostinner.q,&e,0)){((struct ble_npl_event_freertos*)e->event)->queued=false;e->callback(e);}}
 static int send_data(uint16_t conn,uint16_t channel,const void*p,unsigned n){struct os_mbuf m={.length=n};memcpy(m.data,p,n);struct ble_gatt_access_ctxt ctx={1,&m};return access_cb(conn,0,&ctx,(void*)(uintptr_t)channel);}
 static void config(const char*c){assert(!send_data(1,AIR_BLE_CONFIG_UUID16,c,strlen(c)));drain();}
 static void subscribe(bool enabled){struct ble_gap_event e={.type=BLE_GAP_EVENT_SUBSCRIBE,.subscribe={1,s_raw_handle,enabled}};gap_event(&e,NULL);drain();}

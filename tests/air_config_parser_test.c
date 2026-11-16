@@ -16,7 +16,7 @@ int main(void)
     air_config_session_t s; air_uart_config_t initial = {115200, 0, 3}; mock_t m = {.apply_ok = true};
     air_config_session_init(&s, &initial, 1); air_config_callbacks_t c = cb(&m);
     air_config_feed(&s, (const uint8_t *)"AT+AUTH=123", strlen("AT+AUTH=123"), 0, &c);
-    assert(!s.authenticated); air_config_feed(&s, (const uint8_t *)"456", 3, 10, &c); air_config_flush_idle(&s, 40, &c); assert(s.authenticated);
+    assert(!s.authenticated); air_config_feed(&s, (const uint8_t *)"456", 3, 10, &c); air_config_flush_idle(&s, 10+AIR_CONFIG_IDLE_DELIMITER_MS, &c); assert(s.authenticated);
     m.len = 0; air_config_feed(&s, (const uint8_t *)"AT+BAUD=6\r\n", strlen("AT+BAUD=6\r\n"), 50, &c); assert(s.uart.baudrate == 57600);
     m.apply_ok = false; air_config_feed(&s, (const uint8_t *)"AT+PARI=1\r\n", strlen("AT+PARI=1\r\n"), 60, &c); assert(s.uart.parity == 0 && strstr(m.out, "+ERR=APPLY"));
     m.apply_ok = true; m.len = 0; char long_cmd[112]; memset(long_cmd, 'X', 110); long_cmd[110] = '\r'; long_cmd[111] = '\n'; air_config_feed(&s, (uint8_t *)long_cmd, sizeof(long_cmd), 70, &c); assert(strstr(m.out, "+ERR=TOO_LONG"));

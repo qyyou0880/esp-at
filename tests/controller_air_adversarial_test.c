@@ -45,7 +45,7 @@ int main(void)
     air_config_flush_idle(&s,200,&cb);
     last_reply[0]=0;
     air_config_feed(&s,(const uint8_t *)"AT+BAUD?",8,210,&cb);
-    air_config_flush_idle(&s,250,&cb);
+    air_config_flush_idle(&s,210+AIR_CONFIG_IDLE_DELIMITER_MS,&cb);
     if(strcmp(last_reply,"+OK=7\r\n")){puts("FAIL: invalid command without CRLF never recovers after idle");return 1;}
     puts("Adversarial framing checks passed");
     return 0;
