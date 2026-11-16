@@ -15,6 +15,7 @@
 #include "nimble/nimble_port.h"
 #include "soc/rtc.h"
 #include "link_gpio_state.h"
+#include "air_ble_service.h"
 #ifdef CONFIG_AT_BASE_ON_UART
 #include "at_uart.h"
 extern at_uart_port_pins_t g_uart_port_pin;
@@ -188,6 +189,17 @@ static uint8_t link_gpio_setup(uint8_t para_num)
     return ok ? ESP_AT_RESULT_CODE_OK : ESP_AT_RESULT_CODE_ERROR;
 }
 
+bool esp_at_link_gpio_configure(int gpio, bool save)
+{
+    if (!s_lock) return false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool ok = !s_powerdown && (gpio == -1 || link_gpio_pin_allowed(gpio));
+    if (ok) ok = link_gpio_prepare_pin(gpio, s_state.active_count != 0);
+    if (ok) ok = link_gpio_state_configure_persist(&s_state, gpio, save ? link_gpio_save_cb : NULL, NULL);
+    xSemaphoreGive(s_lock);
+    return ok;
+}
+
 static uint8_t rtc_clock_query(uint8_t *cmd_name)
 {
     soc_rtc_slow_clk_src_t source = rtc_clk_slow_src_get();
@@ -246,6 +258,12 @@ esp_err_t __wrap_nimble_port_init(void)
     if (ble_gap_event_listener_register(&s_listener, link_gpio_gap_event, NULL) != 0) {
         (void)__real_nimble_port_deinit();
         ESP_LOGE(TAG, "GAP listener registration failed");
+        return ESP_FAIL;
+    }
+    if (!air_ble_service_register()) {
+        (void)ble_gap_event_listener_unregister(&s_listener);
+        (void)__real_nimble_port_deinit();
+        ESP_LOGE(TAG, "air BLE service registration failed");
         return ESP_FAIL;
     }
     s_listener_registered = true;

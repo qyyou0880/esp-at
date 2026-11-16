@@ -23,6 +23,7 @@
 #include "soc/uart_pins.h"
 #include "at_uart.h"
 #include "esp_at_interface.h"
+#include "air_ble_service.h"
 
 #if CONFIG_AT_DEBUG
 #define ESP_AT_UART_TASK_STACK_SIZE     esp_at_max(4096, CONFIG_AT_UART_TASK_STACK_SIZE)
@@ -69,6 +70,19 @@ static void at_uart_flush(void)
     xQueueReset(s_at_uart_queue);
 }
 
+static bool at_uart_route_raw(size_t length)
+{
+    if (!air_ble_service_uart_active()) return false;
+    uint8_t buffer[256];
+    while (length) {
+        size_t chunk = length > sizeof(buffer) ? sizeof(buffer) : length;
+        int got = uart_read_bytes(g_at_cmd_port, buffer, chunk, 0);
+        if (got != (int)chunk || !air_ble_service_uart_route(buffer, chunk)) return true;
+        length -= chunk;
+    }
+    return true;
+}
+
 static bool at_uart_wait_tx_done(int32_t ms)
 {
     if (uart_wait_tx_done(g_at_cmd_port, ms / portTICK_PERIOD_MS) == ESP_OK) {
@@ -102,7 +116,7 @@ retry:
                     if (event.type == UART_DATA) {
                         data_len += event.size;
                     } else if (event.type == UART_BUFFER_FULL) {
-                        esp_at_port_recv_data_notify(data_len, portMAX_DELAY);
+                        if (!at_uart_route_raw(data_len)) esp_at_port_recv_data_notify(data_len, portMAX_DELAY);
                         data_len = event.size;
                         break;
                     } else {
@@ -110,7 +124,7 @@ retry:
                         break;
                     }
                 }
-                esp_at_port_recv_data_notify(data_len, portMAX_DELAY);
+                if (!at_uart_route_raw(data_len)) esp_at_port_recv_data_notify(data_len, portMAX_DELAY);
                 data_len = 0;
 
                 if (retry_flag == pdTRUE) {
@@ -147,7 +161,8 @@ retry:
                         break;
                     }
                 }
-                esp_at_port_recv_data_notify(at_uart_get_data_len(), portMAX_DELAY);
+                size_t available = at_uart_get_data_len();
+                if (!at_uart_route_raw(available)) esp_at_port_recv_data_notify(available, portMAX_DELAY);
                 data_len = 0;
                 if (retry_flag == pdTRUE) {
                     goto retry;

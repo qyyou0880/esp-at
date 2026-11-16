@@ -4,6 +4,12 @@
 include/config
 include/sdkconfig.h
 build/
+build-*/
+esp-idf
+/sdkconfig.*
+*.elf
+*.map
+*.o
 sdkconfig.old
 sdkconfig
 .DS_Store
