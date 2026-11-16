@@ -164,7 +164,8 @@ static bool execute(air_config_session_t *s, char *cmd, const air_config_callbac
         return true;
     }
 bad:
-    reply(cb, "+ERR=PARAM\r\n");
+    snprintf(response,sizeof(response),"+ERR=PARAM_LENGTH_%u\r\n",(unsigned)strlen(cmd));
+    reply(cb,response);
     return false;
 apply_failed:
     reply(cb, "+ERR=APPLY\r\n");
@@ -253,7 +254,7 @@ bool air_config_feed(air_config_session_t *s, const uint8_t *data, size_t length
         if (ch < 0x20 || ch > 0x7e) {
             s->pending_len = 0;
             s->discarding = true;
-            reply(cb, "+ERR=PARAM\r\n");
+            reply(cb, "+ERR=PARAM_CONTROL\r\n");
             handled = true;
             continue;
         }

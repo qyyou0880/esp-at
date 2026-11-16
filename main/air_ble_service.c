@@ -43,6 +43,8 @@ static bool s_fault;
 static air_config_session_t s_session;
 static air_message_t s_context;
 static TickType_t s_reset_at;
+static TickType_t s_reset_close_at;
+static uint32_t s_reset_generation;
 static TickType_t s_mute_until;
 
 static bool valid(uint16_t conn, uint32_t generation)
@@ -246,7 +248,9 @@ static bool reset(void *arg)
 {
     air_message_t *ctx = arg;
     if (!valid(ctx->conn,ctx->generation)) return false;
-    s_reset_at = xTaskGetTickCount() + pdMS_TO_TICKS(200);
+    s_reset_generation=ctx->generation;
+    s_reset_close_at=xTaskGetTickCount()+pdMS_TO_TICKS(150);
+    s_reset_at = xTaskGetTickCount() + pdMS_TO_TICKS(500);
     if (!s_reset_at) s_reset_at = 1;
     return true;
 }
@@ -286,6 +290,10 @@ static void worker_step(void)
         }
         if (valid(s_context.conn,s_context.generation))
             air_config_flush_idle(&s_session,xTaskGetTickCount()*portTICK_PERIOD_MS,&callbacks);
+        if (s_reset_close_at && (int32_t)(xTaskGetTickCount()-s_reset_close_at) >= 0) {
+            fail_session(s_reset_generation);
+            s_reset_close_at=0;
+        }
         if (s_reset_at && (int32_t)(xTaskGetTickCount()-s_reset_at) >= 0) esp_at_restart();
 }
 
@@ -386,7 +394,10 @@ static void manager(void *arg)
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(200));
     /* Use the ESP-AT GAP callback, retaining legacy connection/SPP bookkeeping. */
-    (void)esp_at_exe_cmd("AT+BLEINIT=2\r\n","\r\nOK\r\n",5000);
+    for (unsigned attempt=0;attempt<3;++attempt) {
+        if (esp_at_exe_cmd("AT+BLEINIT=2\r\n","\r\nOK\r\n",5000)==ESP_OK) break;
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
     for (;;) {
         portENTER_CRITICAL(&s_lock);
         bool registered=s_registered, configured=s_configured, pending=s_adv_pending;
