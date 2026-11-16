@@ -30,6 +30,7 @@ typedef struct {
     char pending[AIR_CONFIG_MAX_COMMAND + 1];
     size_t pending_len;
     uint32_t last_rx_ms;
+    bool discarding;
 } air_config_session_t;
 
 typedef bool (*air_config_apply_fn)(const air_uart_config_t *config, void *arg);

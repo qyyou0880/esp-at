@@ -162,6 +162,7 @@ bool at_nvs_uart_config_get(uart_config_t *config);
  * @return    true/false
 */
 void at_nvs_uart_config_set(uart_config_t *config);
+bool at_nvs_uart_config_set_checked(uart_config_t *config);
 
 /**
  * @brief This function is used to get real uart communication port.

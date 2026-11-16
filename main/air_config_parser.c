@@ -35,6 +35,14 @@ static bool parse_decimal(const char *s, int *out)
     return true;
 }
 
+static int baud_code(uint32_t baudrate)
+{
+    static const uint32_t rates[] = {2400, 4800, 9600, 14400, 19200, 38400, 57600, 115200};
+    for (int i = 0; i < (int)(sizeof(rates) / sizeof(rates[0])); ++i)
+        if (rates[i] == baudrate) return i;
+    return -1;
+}
+
 static bool requires_auth(const char *cmd)
 {
     return strncmp(cmd, "AT+VER?", 7) != 0 && strncmp(cmd, "AT+AUTH=", 8) != 0;
@@ -64,11 +72,9 @@ static bool execute(air_config_session_t *s, char *cmd, const air_config_callbac
         return false;
     }
     if (strcmp(cmd, "AT+BAUD?") == 0) {
-        static const uint32_t rates[] = {2400,4800,9600,14400,19200,38400,57600,115200};
-        unsigned code = 7;
-        for (unsigned i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i)
-            if (s->uart.baudrate == rates[i]) code = i;
-        snprintf(response, sizeof(response), "+OK=%u\r\n", code);
+        int code = baud_code(s->uart.baudrate);
+        if (code < 0) { reply(cb, "+ERR=UNSUPPORTED\r\n"); return false; }
+        snprintf(response, sizeof(response), "+OK=%d\r\n", code);
         reply(cb, response);
         return true;
     }
@@ -78,7 +84,10 @@ static bool execute(air_config_session_t *s, char *cmd, const air_config_callbac
         air_uart_config_t next = s->uart;
         if (!parse_decimal(cmd + 8, &code) || code < 0 || code > 7) goto bad;
         next.baudrate = rates[code];
-        if (!cb->apply_uart || !cb->apply_uart(&next, cb->arg)) goto apply_failed;
+        if (!cb->apply_uart || !cb->apply_uart(&next, cb->arg)) {
+            if (cb->apply_uart) (void)cb->apply_uart(&s->uart, cb->arg);
+            goto apply_failed;
+        }
         s->uart = next;
         reply(cb, "+OK\r\n");
         return true;
@@ -93,19 +102,26 @@ static bool execute(air_config_session_t *s, char *cmd, const air_config_callbac
         air_uart_config_t next = s->uart;
         if (!parse_decimal(cmd + 8, &value) || (value != 0 && value != 1)) goto bad;
         next.parity = (uint8_t)value;
-        if (!cb->apply_uart || !cb->apply_uart(&next, cb->arg)) goto apply_failed;
+        if (!cb->apply_uart || !cb->apply_uart(&next, cb->arg)) {
+            if (cb->apply_uart) (void)cb->apply_uart(&s->uart, cb->arg);
+            goto apply_failed;
+        }
         s->uart = next;
         reply(cb, "+OK\r\n");
         return true;
     }
     if (strcmp(cmd, "AT+DATABITS?") == 0) {
-        reply(cb, "+OK=3\r\n");
+        snprintf(response, sizeof(response), "+OK=%u\r\n", s->uart.databits);
+        reply(cb, response);
         return true;
     }
     if (strcmp(cmd, "AT+DATABITS=3") == 0) {
         air_uart_config_t next = s->uart;
         next.databits = 3;
-        if (cb->apply_uart && !cb->apply_uart(&next, cb->arg)) goto apply_failed;
+        if (!cb->apply_uart || !cb->apply_uart(&next, cb->arg)) {
+            if (cb->apply_uart) (void)cb->apply_uart(&s->uart, cb->arg);
+            goto apply_failed;
+        }
         s->uart = next;
         reply(cb, "+OK\r\n");
         return true;
@@ -130,7 +146,10 @@ static bool execute(air_config_session_t *s, char *cmd, const air_config_callbac
         char *comma = strchr(cmd + 12, ',');
         int gpio, save = 0;
         if (comma) *comma++ = '\0';
-        if (!parse_decimal(cmd + 12, &gpio) && strcmp(cmd + 12, "-1") != 0) goto bad;
+        if (!parse_decimal(cmd + 12, &gpio)) {
+            if (strcmp(cmd + 12, "-1") != 0) goto bad;
+            gpio = -1;
+        }
         if (comma && (!parse_decimal(comma, &save) || save > 1)) goto bad;
         if (!cb->apply_link || !cb->apply_link(gpio, save != 0, cb->arg)) goto apply_failed;
         s->link_gpio = gpio;
@@ -170,6 +189,7 @@ void air_config_session_disconnect(air_config_session_t *s, uint32_t next_genera
     s->notify_armed = false;
     s->pending_len = 0;
     s->last_rx_ms = 0;
+    s->discarding = false;
 }
 
 bool air_config_generation_valid(const air_config_session_t *s, uint32_t generation)
@@ -182,10 +202,23 @@ void air_config_set_link_state(air_config_session_t *s, int gpio, bool high, uns
     s->link_gpio = gpio; s->link_high = high; s->link_count = count; s->link_fault = fault;
 }
 
-void air_config_set_notify_armed(air_config_session_t *s, bool armed) { s->notify_armed = armed; }
+void air_config_set_notify_armed(air_config_session_t *s, bool armed)
+{
+    s->notify_armed = armed;
+    /* FFF1 subscription is the updater's explicit raw-mode handshake. */
+    if (armed) s->raw_mode = true;
+    else s->raw_mode = false;
+}
 
 bool air_config_flush_idle(air_config_session_t *s, uint32_t now_ms, const air_config_callbacks_t *cb)
 {
+    if (s->discarding) {
+        if (now_ms - s->last_rx_ms >= AIR_CONFIG_IDLE_DELIMITER_MS) {
+            s->discarding = false;
+            s->pending_len = 0;
+        }
+        return false;
+    }
     if (!s->pending_len || now_ms - s->last_rx_ms < AIR_CONFIG_IDLE_DELIMITER_MS) return false;
     if (s->pending_len > AIR_CONFIG_MAX_COMMAND) {
         s->pending_len = 0;
@@ -199,12 +232,12 @@ bool air_config_flush_idle(air_config_session_t *s, uint32_t now_ms, const air_c
 bool air_config_feed(air_config_session_t *s, const uint8_t *data, size_t length,
                      uint32_t now_ms, const air_config_callbacks_t *cb)
 {
-    /* Once transparent mode is selected every byte belongs to the raw bridge. */
-    if (s->raw_mode) return false;
+    if (!s || !data || !length) return false;
     bool handled = false;
     for (size_t i = 0; i < length; ++i) {
         uint8_t ch = data[i];
         if (ch == '\r' || ch == '\n') {
+            if (s->discarding) { s->discarding = false; s->pending_len = 0; continue; }
             if (s->pending_len > AIR_CONFIG_MAX_COMMAND) {
                 s->pending_len = 0;
                 continue;
@@ -215,10 +248,19 @@ bool air_config_feed(air_config_session_t *s, const uint8_t *data, size_t length
             s->pending_len = 0;
             continue;
         }
-        if (s->pending_len > AIR_CONFIG_MAX_COMMAND) continue;
+        if (s->discarding) continue;
+        if (s->raw_mode && s->pending_len == 0 && ch != 'A') continue;
+        if (ch < 0x20 || ch > 0x7e) {
+            s->pending_len = 0;
+            s->discarding = true;
+            reply(cb, "+ERR=PARAM\r\n");
+            handled = true;
+            continue;
+        }
         if (s->pending_len >= AIR_CONFIG_MAX_COMMAND) {
             /* Keep discarding this line so its tail cannot become a command. */
             s->pending_len = AIR_CONFIG_MAX_COMMAND + 1;
+            s->discarding = true;
             reply(cb, "+ERR=TOO_LONG\r\n");
             handled = true;
             continue;

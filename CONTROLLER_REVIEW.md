@@ -75,3 +75,79 @@ actual source files that implement auto-start and RX routing. No hardware flashi
 
 An incomplete scaffold with a successful link is still incomplete. Update
 IMPLEMENTATION.md to match what is actually implemented and tested.
+
+## Controller follow-up during the explicitly authorized second implementation
+
+These are intentional controller review inputs, not unexplained user edits. The
+controller expanded tests/controller_air_adversarial_test.c with a failing test:
+after an invalid command WITHOUT CRLF and an idle boundary, a valid no-CRLF command
+must work. Current discarding state never recovers because flush_idle returns early.
+Track last receive time on discarded bytes; idle should clear discard, not execute
+any discarded suffix. Current client does not send CRLF.
+
+The controller also inspected the service intermediate at ~700 seconds; re-check
+these before declaring completion:
+- Worker calls advertising before NimBLE host sync, then leaves adv_pending false
+  on failure. Ensure real automatic advertisement after host sync, not only after
+  the first disconnect. Preserve normal AT BLE advertising state consistency.
+- air_reply and UART notification race disconnect/reuse between checking s_conn
+  and notifying. All output needs generation-tagged host-queue dispatch. Raw UART
+  chunks must be segmented to actual negotiated MTU-3 (20 if no exchange), not
+  blindly notify 256 bytes and disconnect on a valid MTU23 link.
+- Single-owner generation/state changes and unsubscribe must not let other legacy
+  connections steal the owner or clear another connection. No shared session data
+  races across GAP, worker and UART tasks. Queue overflow must fail a session.
+- UART configuration must read actual current driver values, wait for previous TX
+  completion and roll back correctly. NVS may not match local AT+UART_CUR changes.
+- Reset callback must schedule a delay after its +OK notification; not immediate.
+- Ensure CONFIG_AT_SELF_COMMAND_SUPPORT is enabled in the actual target defaults;
+  merely putting autostart under an off-by-default ifdef is not implementation.
+- Still require production routing/session tests for a 258-byte binary frame,
+  stale queued input/output, config-after-TRANMD, unsubscribe/reconnect and raw +++.
+
+Do not stop solely because these two review/test files changed: they were
+intentionally supplied and authorized by the Windows controller for this task.
+
+Controller verified build environment just now: rich-click 1.9.9 IS present in
+/home/acer/.local/share/dual-codex/c6-setup-20261115/environment/idf-tools/python_env/idf6.1_py3.10_env/bin/python
+(pip show confirmed). It is not in bootstrap/bin/python. Use bootstrap only to run
+idf_tools.py export; run idf.py with the IDF venv interpreter and exported PATH.
+The earlier noext32k build succeeded with that exact existing environment; no
+package installs are needed. Reuse existing managed_components from environment/project.
+
+The current self-command diff only removes UART write and bounds one-chunk search.
+It does NOT yet serialize concurrent calls, match a split response, or keep callback
+state valid after timeout cleanup. Fix these actual lifetime issues as required by
+the original review; do not claim scoped/split-safe capture until implemented.
+
+Controller supplied a concrete replacement candidate at /tmp/parent_at_self_cmd.c
+and test at /tmp/test_parent_self_cmd.py. It passes Windows GCC -Wall -Wextra -Werror
+with split terminal OK, ERROR, reentrant caller rejection, timeout quarantine and
+late response recovery. Review and adapt it instead of leaving self-command UAF
+and one-chunk matching unresolved. Persistent guarded state eliminates frees while
+the core can still reference it; no command payload logging. It expects autostart
+to use the full terminal string "\r\nOK\r\n", not a substring "OK".
+These /tmp candidate/test inputs are deliberately controller-authored/authorized.
+To run Linux host test: python3 /tmp/test_parent_self_cmd.py /tmp/parent_at_self_cmd.c
+Reuse existing managed_components AND dependencies.lock from the successful base
+environment/project before CMake so the offline sandbox need not fetch registry.
+
+Controller supplied a concrete replacement candidate at /tmp/parent_at_self_cmd.c
+and test at /tmp/test_parent_self_cmd.py. It passes Windows GCC -Wall -Wextra -Werror
+with split terminal OK, ERROR, reentrant caller rejection, timeout quarantine and
+late response recovery. Review and adapt it instead of leaving self-command UAF
+and one-chunk matching unresolved. Persistent guarded state eliminates frees while
+the core can still reference it; no command payload logging. It expects autostart
+to use the full terminal string "\r\nOK\r\n", not a substring "OK".
+These /tmp candidate/test inputs are deliberately controller-authored/authorized.
+To run Linux host test: python3 /tmp/test_parent_self_cmd.py /tmp/parent_at_self_cmd.c
+Reuse existing managed_components AND dependencies.lock from the successful base
+environment/project before CMake so the offline sandbox need not fetch registry.
+
+Critical legacy compatibility: direct ble_gap_adv_start(..., NULL, NULL) bypasses
+the ESP-AT GAP callback that tracks connections/SPP. A GAP listener for LINK is
+not a substitute. Prefer internally executing normal AT BLEADVPARAM, BLEADVDATA,
+BLEADVSTART (after BLEINIT has completed and full terminal response captured),
+including disconnect restart. This preserves the existing AT connection state
+and A002/A003 behavior. Do not merely add raw GAP advertising with a NULL callback.
+Controller candidate now also explicitly clears completed-generation before reuse.

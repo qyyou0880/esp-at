@@ -10,6 +10,7 @@
 #include "esp_at.h"
 #include "esp_at_internal.h"
 #include "esp_at_init.h"
+#include "air_ble_service.h"
 
 void app_main(void)
 {
@@ -20,4 +21,5 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     esp_at_init();
+    air_ble_service_autostart();
 }

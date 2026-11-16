@@ -21,6 +21,9 @@ int main(void)
     m.apply_ok = false; air_config_feed(&s, (const uint8_t *)"AT+PARI=1\r\n", strlen("AT+PARI=1\r\n"), 60, &c); assert(s.uart.parity == 0 && strstr(m.out, "+ERR=APPLY"));
     m.apply_ok = true; m.len = 0; char long_cmd[112]; memset(long_cmd, 'X', 110); long_cmd[110] = '\r'; long_cmd[111] = '\n'; air_config_feed(&s, (uint8_t *)long_cmd, sizeof(long_cmd), 70, &c); assert(strstr(m.out, "+ERR=TOO_LONG"));
     m.len = 0; air_config_feed(&s, (const uint8_t *)"AT+TRANMD=1\r\n+++", strlen("AT+TRANMD=1\r\n+++"), 80, &c); assert(s.raw_mode && !strstr(m.out, "+++"));
+    m.len = 0; air_config_feed(&s, (const uint8_t *)"AT+BAUD?\r\n", strlen("AT+BAUD?\r\n"), 90, &c); assert(strstr(m.out, "+OK=6"));
+    air_config_set_notify_armed(&s, true); assert(s.raw_mode && s.notify_armed);
+    m.len = 0; air_config_feed(&s, (const uint8_t *)"AT+PARI?\r\n", strlen("AT+PARI?\r\n"), 100, &c); assert(strstr(m.out, "+OK=0"));
     air_config_session_disconnect(&s, 2); assert(!s.authenticated && !air_config_generation_valid(&s, 1));
     m.len = 0; air_config_feed(&s, (const uint8_t *)"AT+BAUD?\r\n", strlen("AT+BAUD?\r\n"), 90, &c); assert(strstr(m.out, "AUTH_REQUIRED"));
     m.len = 0; air_config_feed(&s, (const uint8_t *)"AT+RESET\r\n", strlen("AT+RESET\r\n"), 100, &c); assert(!strstr(m.out, "+OK"));

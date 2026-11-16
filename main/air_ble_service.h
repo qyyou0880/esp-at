@@ -13,6 +13,8 @@
 #define AIR_BLE_CONFIG_UUID16  0xFFF3
 
 bool air_ble_service_register(void);
+void air_ble_service_unregister(void);
+void air_ble_service_autostart(void);
 bool air_ble_service_uart_active(void);
 bool air_ble_service_uart_route(const uint8_t *data, size_t length);
 

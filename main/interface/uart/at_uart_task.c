@@ -77,7 +77,7 @@ static bool at_uart_route_raw(size_t length)
     while (length) {
         size_t chunk = length > sizeof(buffer) ? sizeof(buffer) : length;
         int got = uart_read_bytes(g_at_cmd_port, buffer, chunk, 0);
-        if (got != (int)chunk || !air_ble_service_uart_route(buffer, chunk)) return true;
+        if (got != (int)chunk || !air_ble_service_uart_route(buffer, chunk)) return false;
         length -= chunk;
     }
     return true;
@@ -116,7 +116,8 @@ retry:
                     if (event.type == UART_DATA) {
                         data_len += event.size;
                     } else if (event.type == UART_BUFFER_FULL) {
-                        if (!at_uart_route_raw(data_len)) esp_at_port_recv_data_notify(data_len, portMAX_DELAY);
+                        if (air_ble_service_uart_active()) (void)at_uart_route_raw(data_len);
+                        else esp_at_port_recv_data_notify(data_len, portMAX_DELAY);
                         data_len = event.size;
                         break;
                     } else {
@@ -124,7 +125,8 @@ retry:
                         break;
                     }
                 }
-                if (!at_uart_route_raw(data_len)) esp_at_port_recv_data_notify(data_len, portMAX_DELAY);
+                if (air_ble_service_uart_active()) (void)at_uart_route_raw(data_len);
+                else esp_at_port_recv_data_notify(data_len, portMAX_DELAY);
                 data_len = 0;
 
                 if (retry_flag == pdTRUE) {
@@ -133,6 +135,11 @@ retry:
                 break;
 
             case UART_PATTERN_DET:
+                if (air_ble_service_uart_active()) {
+                    size_t available = at_uart_get_data_len();
+                    if (available) (void)at_uart_route_raw(available);
+                    break;
+                }
                 pattern_pos = uart_pattern_pop_pos(g_at_cmd_port);
                 if (pattern_pos >= 0) {
                     data = (uint8_t *)malloc(pattern_pos + 3);
@@ -162,7 +169,8 @@ retry:
                     }
                 }
                 size_t available = at_uart_get_data_len();
-                if (!at_uart_route_raw(available)) esp_at_port_recv_data_notify(available, portMAX_DELAY);
+                if (air_ble_service_uart_active()) (void)at_uart_route_raw(available);
+                else esp_at_port_recv_data_notify(available, portMAX_DELAY);
                 data_len = 0;
                 if (retry_flag == pdTRUE) {
                     goto retry;

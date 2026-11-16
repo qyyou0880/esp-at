@@ -277,6 +277,7 @@ esp_err_t __wrap_nimble_port_init(void)
 esp_err_t __wrap_nimble_port_deinit(void)
 {
     esp_at_link_gpio_clear_for_powerdown();
+    air_ble_service_unregister();
     /* Core stops the NimBLE host before deinit. Unregister before dynamic GAP storage is freed. */
     if (s_listener_registered) {
         (void)ble_gap_event_listener_unregister(&s_listener);

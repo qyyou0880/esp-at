@@ -27,10 +27,22 @@ typedef struct {
     int32_t data_len;  /*!< available data length of self command */
     char *resp;        /*!< expected response from self command */
     bool mode;         /*!< self command mode */
+    uint8_t match[64];
+    size_t match_len;
 } at_self_cmd_t;
 
 at_self_cmd_t *s_self_cmd = NULL;
 static const char *TAG = "at-self-cmd";
+static StaticSemaphore_t s_call_lock_storage;
+static StaticSemaphore_t s_state_lock_storage;
+static SemaphoreHandle_t s_call_lock;
+static SemaphoreHandle_t s_state_lock;
+
+static void at_self_cmd_locks_init(void)
+{
+    if (!s_call_lock) s_call_lock = xSemaphoreCreateMutexStatic(&s_call_lock_storage);
+    if (!s_state_lock) s_state_lock = xSemaphoreCreateMutexStatic(&s_state_lock_storage);
+}
 
 bool at_self_cmd_get_mode(void)
 {
@@ -55,14 +67,43 @@ int32_t at_self_cmd_read_data(uint8_t *buffer, int32_t buffer_len)
 
 int32_t at_self_cmd_write_data(uint8_t *data, int32_t len)
 {
-    at_write_data_fn_t write_fn = at_interface_get_write_fn();
-    int32_t ret = write_fn(data, len);
-
-    // check the response
-    if (strstr((char *)data, s_self_cmd->resp)) {
+    /* Internal boot commands must never leak responses onto the host UART. */
+    int32_t ret = len;
+    at_self_cmd_locks_init();
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
+    if (!s_self_cmd) { xSemaphoreGive(s_state_lock); return ret; }
+    size_t expected_len = strlen(s_self_cmd->resp);
+    bool found = false;
+    if (expected_len < sizeof(s_self_cmd->match)) {
+        size_t total = s_self_cmd->match_len + (size_t)len;
+        if (total <= sizeof(s_self_cmd->match)) {
+            memcpy(s_self_cmd->match + s_self_cmd->match_len, data, (size_t)len);
+            for (size_t i = 0; i + expected_len <= total; ++i) {
+                if (memcmp(s_self_cmd->match + i, s_self_cmd->resp, expected_len) == 0) {
+                    found = true;
+                    break;
+                }
+            }
+            size_t keep = expected_len > 1 ? expected_len - 1 : 0;
+            if (keep > total) keep = total;
+            memmove(s_self_cmd->match, s_self_cmd->match + total - keep, keep);
+            s_self_cmd->match_len = keep;
+        } else {
+            if (expected_len <= (size_t)len) {
+                for (size_t i = 0; i + expected_len <= (size_t)len; ++i) {
+                    if (memcmp(data + i, s_self_cmd->resp, expected_len) == 0) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            s_self_cmd->match_len = 0;
+        }
+    }
+    if (found) {
         xEventGroupSetBits(s_self_cmd->status_bits, AT_CMD_RESP_BIT);
     }
-
+    xSemaphoreGive(s_state_lock);
     return ret;
 }
 
@@ -73,6 +114,8 @@ int32_t at_self_cmd_get_data_len(void)
 
 static void at_self_cmd_cleanup(void)
 {
+    at_self_cmd_locks_init();
+    xSemaphoreTake(s_state_lock, portMAX_DELAY);
     if (s_self_cmd) {
         if (s_self_cmd->cmd) {
             free(s_self_cmd->cmd);
@@ -89,15 +132,20 @@ static void at_self_cmd_cleanup(void)
         free(s_self_cmd);
         s_self_cmd = NULL;
     }
+    xSemaphoreGive(s_state_lock);
 }
 
 esp_err_t esp_at_exe_cmd(const char *cmd, const char *expected_response, uint32_t timeout_ms)
 {
     esp_err_t ret = ESP_OK;
 
+    at_self_cmd_locks_init();
+    xSemaphoreTake(s_call_lock, portMAX_DELAY);
+
     // init
     s_self_cmd = (at_self_cmd_t *)malloc(sizeof(at_self_cmd_t));
     if (!s_self_cmd) {
+        xSemaphoreGive(s_call_lock);
         return ESP_ERR_NO_MEM;
     }
 
@@ -107,6 +155,7 @@ esp_err_t esp_at_exe_cmd(const char *cmd, const char *expected_response, uint32_
     s_self_cmd->resp = strdup(expected_response);
     if (!s_self_cmd->status_bits || !s_self_cmd->cmd || !s_self_cmd->resp) {
         at_self_cmd_cleanup();
+        xSemaphoreGive(s_call_lock);
         return ESP_ERR_NO_MEM;
     }
     at_self_cmd_set_mode(true);
@@ -124,6 +173,7 @@ esp_err_t esp_at_exe_cmd(const char *cmd, const char *expected_response, uint32_
     // deinit
     at_self_cmd_set_mode(false);
     at_self_cmd_cleanup();
+    xSemaphoreGive(s_call_lock);
     return ret;
 }
 #endif

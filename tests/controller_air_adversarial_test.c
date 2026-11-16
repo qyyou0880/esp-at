@@ -39,6 +39,14 @@ int main(void)
     const char *baud="AT+BAUD?\r\n";
     air_config_feed(&s,(const uint8_t *)baud,strlen(baud),30,&cb);
     if(strstr(last_reply,"+OK=7")){puts("FAIL: unknown actual baud falsely reported as 115200");return 1;}
+    air_config_session_init(&s,NULL,5);s.authenticated=true;
+    const unsigned char bad_fragment[]={0,'x'};
+    air_config_feed(&s,bad_fragment,sizeof(bad_fragment),100,&cb);
+    air_config_flush_idle(&s,200,&cb);
+    last_reply[0]=0;
+    air_config_feed(&s,(const uint8_t *)"AT+BAUD?",8,210,&cb);
+    air_config_flush_idle(&s,250,&cb);
+    if(strcmp(last_reply,"+OK=7\r\n")){puts("FAIL: invalid command without CRLF never recovers after idle");return 1;}
     puts("Adversarial framing checks passed");
     return 0;
 }
