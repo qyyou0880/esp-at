@@ -4,10 +4,11 @@
 #include <string.h>
 
 static int applies;
+static bool apply_ok=true;
 static int linked_gpio;
 static char last_reply[128];
 static bool apply(const air_uart_config_t *value,void *arg)
-{ (void)value;(void)arg; ++applies;return true; }
+{ (void)value;(void)arg; ++applies;return apply_ok; }
 static void response(const char *text,size_t len,void *arg)
 { (void)arg; assert(len<sizeof(last_reply));memcpy(last_reply,text,len);last_reply[len]=0; }
 static bool link_apply(int gpio,bool save,void *arg)
@@ -47,6 +48,26 @@ int main(void)
     air_config_feed(&s,(const uint8_t *)"AT+BAUD?",8,210,&cb);
     air_config_flush_idle(&s,210+AIR_CONFIG_IDLE_DELIMITER_MS,&cb);
     if(strcmp(last_reply,"+OK=7\r\n")){puts("FAIL: invalid command without CRLF never recovers after idle");return 1;}
+    const char *absolute="AT+BAUDRATE=1000000\r\n";
+    air_config_feed(&s,(const uint8_t *)absolute,strlen(absolute),400,&cb);
+    assert(s.uart.baudrate==1000000);
+    const char *query="AT+BAUDRATE?\r\n";
+    air_config_feed(&s,(const uint8_t *)query,strlen(query),410,&cb);
+    assert(strcmp(last_reply,"+OK=1000000\r\n")==0);
+    const char *invalid[]={"AT+BAUDRATE=79\r\n","AT+BAUDRATE=5000001\r\n",
+        "AT+BAUDRATE=-1\r\n","AT+BAUDRATE=9999999999999999\r\n"};
+    int before=applies;
+    for(unsigned i=0;i<sizeof(invalid)/sizeof(invalid[0]);++i)
+        air_config_feed(&s,(const uint8_t *)invalid[i],strlen(invalid[i]),420+i,&cb);
+    assert(applies==before&&s.uart.baudrate==1000000);
+    apply_ok=false;
+    const char *failed="AT+BAUDRATE=2000000\r\n";
+    air_config_feed(&s,(const uint8_t *)failed,strlen(failed),430,&cb);
+    assert(s.uart.baudrate==1000000&&strstr(last_reply,"+ERR=APPLY"));
+    apply_ok=true;
+    const char *maximum="AT+BAUDRATE=5000000\r\n";
+    air_config_feed(&s,(const uint8_t *)maximum,strlen(maximum),440,&cb);
+    assert(s.uart.baudrate==5000000);
     puts("Adversarial framing checks passed");
     return 0;
 }

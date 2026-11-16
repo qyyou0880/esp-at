@@ -55,7 +55,7 @@ static bool execute(air_config_session_t *s, char *cmd, const air_config_callbac
 {
     char response[80];
     if (strcmp(cmd, "AT+VER?") == 0) {
-        reply(cb, "+OK=SEISTECH-C6-AIR-1\r\n");
+        reply(cb, "+OK=SEISTECH-C6-AIR-2\r\n");
         return true;
     }
     if (strncmp(cmd, "AT+AUTH=", 8) == 0) {
@@ -73,6 +73,22 @@ static bool execute(air_config_session_t *s, char *cmd, const air_config_callbac
     if (requires_auth(cmd) && !s->authenticated) {
         reply(cb, "+ERR=AUTH_REQUIRED\r\n");
         return false;
+    }
+    if (strcmp(cmd,"AT+BAUDRATE?")==0) {
+        snprintf(response,sizeof(response),"+OK=%lu\r\n",(unsigned long)s->uart.baudrate);
+        reply(cb,response);
+        return true;
+    }
+    if (strncmp(cmd,"AT+BAUDRATE=",12)==0) {
+        int rate;
+        if (!parse_decimal(cmd+12,&rate) || rate<(int)AIR_UART_BAUD_MIN ||
+            rate>(int)AIR_UART_BAUD_MAX) goto bad;
+        air_uart_config_t next=s->uart;
+        next.baudrate=(uint32_t)rate;
+        if (!cb->apply_uart || !cb->apply_uart(&next,cb->arg)) goto apply_failed;
+        s->uart=next;
+        reply(cb,"+OK\r\n");
+        return true;
     }
     if (strcmp(cmd, "AT+BAUD?") == 0) {
         int code = baud_code(s->uart.baudrate);

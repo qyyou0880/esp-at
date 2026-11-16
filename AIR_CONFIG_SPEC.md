@@ -39,7 +39,11 @@ Never log authentication payloads, passwords or internal commands containing the
   only. Public factory default is 123456. Reject all modifying/query config commands
   before authentication (AT/version may be public if documented). Clear auth and
   pending fragments at disconnect; do not reuse a stale command on a new connection.
-- `AT+VER?`: identify as `+OK=SEISTECH-C6-AIR-1` (NOT FW-7534).
+- `AT+VER?`: identify as `+OK=SEISTECH-C6-AIR-2` (NOT FW-7534).
+- `AT+BAUDRATE?`, `AT+BAUDRATE=<absolute>`: AIR-2 absolute baud rate, 80..5000000,
+  subject to actual UART driver acceptance. Query reports actual divisor-derived
+  rate. Application target for the C6 companion STM32 build is 1000000 8N1.
+  This does not change the E104-compatible BAUD code mapping below, or ROM speed.
 - `AT+BAUD?`, `AT+BAUD=<code>`: verified mapping 0=2400,1=4800,2=9600,
   3=14400,4=19200,5=38400,6=57600,7=115200; reject unsupported codes rather than
   guessing. Query defaults to code7 on virgin NVS.

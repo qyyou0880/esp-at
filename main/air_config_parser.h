@@ -9,6 +9,8 @@
 #define AIR_CONFIG_MAX_COMMAND 96
 #define AIR_CONFIG_IDLE_DELIMITER_MS 100
 #define AIR_CONFIG_AUTH_DEFAULT "123456"
+#define AIR_UART_BAUD_MIN 80U
+#define AIR_UART_BAUD_MAX 5000000U
 
 typedef struct {
     uint32_t baudrate;
